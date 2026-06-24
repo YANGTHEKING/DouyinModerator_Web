@@ -18,7 +18,8 @@ export type LiveEventType =
   | "gift"
   | "like"
   | "follow"
-  | "fansclub";
+  | "fansclub"
+  | "system";
 
 export type GiftValueSource = "catalog-name" | "catalog-image" | "page-panel";
 
@@ -27,6 +28,7 @@ export interface LiveEvent {
   type: LiveEventType;
   fingerprint: string;
   userName: string;
+  fanClubName?: string;
   content: string;
   giftName?: string;
   count?: number;
@@ -85,6 +87,7 @@ export interface SendQueueItem {
   source: string;
   status: QueueStatus;
   createdAt: number;
+  allowRepeat?: boolean;
   sentAt?: number;
   error?: string;
   eventId?: string;
@@ -95,6 +98,8 @@ export type SessionLogKind = "event" | "assistant" | "send" | "warning" | "error
 export interface SessionLogEntry {
   id: string;
   kind: SessionLogKind;
+  eventType?: LiveEventType;
+  userName: string;
   message: string;
   timestamp: number;
 }

@@ -3,6 +3,7 @@ import type { LiveEvent } from "./types";
 export function resolveReplyTemplate(template: string, event: LiveEvent): string {
   const replacements: Record<string, string> = {
     user: event.userName || "用户",
+    fanclub: event.fanClubName || "",
     gift: event.giftName || "",
     count: typeof event.count === "number" ? String(event.count) : "",
     diamonds: typeof event.giftDiamondCount === "number" ? String(event.giftDiamondCount) : "",
@@ -10,7 +11,7 @@ export function resolveReplyTemplate(template: string, event: LiveEvent): string
     content: event.content || ""
   };
 
-  return template.replace(/\{(user|gift|count|diamonds|totalDiamonds|content)\}/g, (_, key: string) => {
+  return template.replace(/\{(user|fanclub|gift|count|diamonds|totalDiamonds|content)\}/g, (_, key: string) => {
     return replacements[key] ?? "";
   });
 }

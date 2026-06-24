@@ -16,7 +16,8 @@ export const liveEventLabels: Record<LiveEventType, string> = {
   gift: "礼物",
   like: "点赞",
   follow: "关注",
-  fansclub: "入团"
+  fansclub: "入团",
+  system: "系统"
 };
 
 export const supportLabels: Record<TriggerSupport, string> = {

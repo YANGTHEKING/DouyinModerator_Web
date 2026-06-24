@@ -1,17 +1,26 @@
 import {
   Activity,
   Download,
+  GripHorizontal,
   Heart,
   ListChecks,
   MessageSquare,
+  Minus,
   Pause,
   Play,
   Plus,
   Trash2,
-  Upload,
-  X
+  Upload
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import { createDefaultProfile } from "../domain/defaultProfile";
 import { createId } from "../domain/ids";
 import {
@@ -32,6 +41,7 @@ import {
   ScheduledAction,
   SendQueueItem,
   SessionLogEntry,
+  LiveEventType,
   TriggerType,
   TRIGGER_TYPES
 } from "../domain/types";
@@ -42,6 +52,26 @@ type TabKey = "rules" | "scheduled" | "logs";
 interface SidebarAppProps {
   adapter: PageAdapter;
 }
+
+interface PanelBounds {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface PanelInteraction {
+  kind: "move" | "resize";
+  startClientX: number;
+  startClientY: number;
+  startBounds: PanelBounds;
+}
+
+const PANEL_EDGE_PADDING = 8;
+const PANEL_DEFAULT_WIDTH = 420;
+const PANEL_DEFAULT_HEIGHT = 640;
+const PANEL_MIN_WIDTH = 320;
+const PANEL_MIN_HEIGHT = 360;
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -60,10 +90,11 @@ function eventSummary(event: LiveEvent): string {
         : event.giftDiamondCountOptions?.length
           ? ` · 价值待确认(${event.giftDiamondCountOptions.join("/")}钻)`
           : "";
-    return `${event.userName} 送出 ${event.giftName ?? "礼物"}${countText}${valueText}`;
+    return `送出 ${event.giftName ?? "礼物"}${countText}${valueText}`;
   }
-  if (event.type === "chat") return `${event.userName}: ${event.content}`;
-  return `${event.userName} ${event.content || liveEventLabels[event.type]}`;
+  if (event.type === "chat") return event.content;
+  if (event.type === "system") return event.content || event.rawText;
+  return event.content || liveEventLabels[event.type];
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -71,15 +102,60 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+function clampPanelBounds(bounds: PanelBounds): PanelBounds {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const maxWidth = Math.max(1, viewportWidth - PANEL_EDGE_PADDING * 2);
+  const maxHeight = Math.max(1, viewportHeight - PANEL_EDGE_PADDING * 2);
+  const width = clampNumber(bounds.width, Math.min(PANEL_MIN_WIDTH, maxWidth), maxWidth);
+  const height = clampNumber(bounds.height, Math.min(PANEL_MIN_HEIGHT, maxHeight), maxHeight);
+  const maxLeft = Math.max(PANEL_EDGE_PADDING, viewportWidth - width - PANEL_EDGE_PADDING);
+  const maxTop = Math.max(PANEL_EDGE_PADDING, viewportHeight - height - PANEL_EDGE_PADDING);
+
+  return {
+    left: clampNumber(bounds.left, PANEL_EDGE_PADDING, maxLeft),
+    top: clampNumber(bounds.top, PANEL_EDGE_PADDING, maxTop),
+    width,
+    height
+  };
+}
+
+function createInitialPanelBounds(): PanelBounds {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const width = Math.min(PANEL_DEFAULT_WIDTH, Math.max(1, viewportWidth - PANEL_EDGE_PADDING * 2));
+  const height = Math.min(PANEL_DEFAULT_HEIGHT, Math.max(1, viewportHeight - PANEL_EDGE_PADDING * 2));
+
+  return clampPanelBounds({
+    left: viewportWidth - width - 16,
+    top: 16,
+    width,
+    height
+  });
+}
+
+function createLauncherStyle(bounds: PanelBounds): CSSProperties {
+  return {
+    left: clampNumber(bounds.left, PANEL_EDGE_PADDING, Math.max(PANEL_EDGE_PADDING, window.innerWidth - 150)),
+    top: clampNumber(bounds.top, PANEL_EDGE_PADDING, Math.max(PANEL_EDGE_PADDING, window.innerHeight - 54))
+  };
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button, input, select, textarea, label, a"));
+}
+
 export function SidebarApp({ adapter }: SidebarAppProps) {
   const [visible, setVisible] = useState(true);
   const [activeTab, setActiveTab] = useState<TabKey>("rules");
+  const [panelBounds, setPanelBounds] = useState<PanelBounds>(() => createInitialPanelBounds());
   const [profile, setProfile] = useState<AssistantProfile>(() => createDefaultProfile());
   const [profileReady, setProfileReady] = useState(false);
   const [running, setRunning] = useState(false);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [logs, setLogs] = useState<SessionLogEntry[]>([]);
   const [queue, setQueue] = useState<SendQueueItem[]>([]);
+  const [hideMemberLogEvents, setHideMemberLogEvents] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profileRef = useRef(profile);
@@ -89,6 +165,88 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   const lastBarrageAtRef = useRef(0);
   const lastSentTextRef = useRef<string | undefined>(undefined);
   const processingRef = useRef(false);
+  const panelBoundsRef = useRef(panelBounds);
+  const panelInteractionRef = useRef<PanelInteraction | null>(null);
+  const bodyCursorRef = useRef("");
+  const bodyUserSelectRef = useRef("");
+
+  useEffect(() => {
+    panelBoundsRef.current = panelBounds;
+  }, [panelBounds]);
+
+  const handlePanelPointerMove = useCallback((event: PointerEvent) => {
+    const interaction = panelInteractionRef.current;
+    if (!interaction) return;
+
+    const deltaX = event.clientX - interaction.startClientX;
+    const deltaY = event.clientY - interaction.startClientY;
+    if (interaction.kind === "move") {
+      setPanelBounds(
+        clampPanelBounds({
+          ...interaction.startBounds,
+          left: interaction.startBounds.left + deltaX,
+          top: interaction.startBounds.top + deltaY
+        })
+      );
+      return;
+    }
+
+    setPanelBounds(
+      clampPanelBounds({
+        ...interaction.startBounds,
+        width: interaction.startBounds.width + deltaX,
+        height: interaction.startBounds.height + deltaY
+      })
+    );
+  }, []);
+
+  const stopPanelInteraction = useCallback(() => {
+    panelInteractionRef.current = null;
+    document.body.style.cursor = bodyCursorRef.current;
+    document.body.style.userSelect = bodyUserSelectRef.current;
+    window.removeEventListener("pointermove", handlePanelPointerMove);
+    window.removeEventListener("pointerup", stopPanelInteraction);
+    window.removeEventListener("pointercancel", stopPanelInteraction);
+  }, [handlePanelPointerMove]);
+
+  const beginPanelInteraction = useCallback(
+    (kind: PanelInteraction["kind"], event: ReactPointerEvent<HTMLElement>) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      if (kind === "move" && isInteractiveTarget(event.target)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (panelInteractionRef.current) stopPanelInteraction();
+
+      bodyCursorRef.current = document.body.style.cursor;
+      bodyUserSelectRef.current = document.body.style.userSelect;
+      document.body.style.cursor = kind === "move" ? "move" : "nwse-resize";
+      document.body.style.userSelect = "none";
+      panelInteractionRef.current = {
+        kind,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startBounds: panelBoundsRef.current
+      };
+      window.addEventListener("pointermove", handlePanelPointerMove);
+      window.addEventListener("pointerup", stopPanelInteraction, { once: true });
+      window.addEventListener("pointercancel", stopPanelInteraction, { once: true });
+    },
+    [handlePanelPointerMove, stopPanelInteraction]
+  );
+
+  useEffect(() => {
+    const handleWindowResize = () => setPanelBounds((current) => clampPanelBounds(current));
+    window.addEventListener("resize", handleWindowResize);
+    return () => window.removeEventListener("resize", handleWindowResize);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (!panelInteractionRef.current) return;
+      stopPanelInteraction();
+    };
+  }, [stopPanelInteraction]);
 
   useEffect(() => {
     profileRef.current = profile;
@@ -102,12 +260,15 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
     queueRef.current = queue;
   }, [queue]);
 
-  const appendLog = useCallback((kind: SessionLogEntry["kind"], message: string) => {
+  const appendLog = useCallback(
+    (kind: SessionLogEntry["kind"], message: string, userName = "系统", eventType?: LiveEventType) => {
     setLogs((current) => [
-      { id: createId("log"), kind, message, timestamp: Date.now() },
+      { id: createId("log"), kind, eventType, userName: userName || "系统", message, timestamp: Date.now() },
       ...current
     ].slice(0, 240));
-  }, []);
+    },
+    []
+  );
 
   const updateProfile = useCallback((updater: (current: AssistantProfile) => AssistantProfile) => {
     setProfile((current) => ({ ...updater(current), updatedAt: Date.now() }));
@@ -135,12 +296,13 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   }, [profile, profileReady]);
 
   const enqueueBarrage = useCallback(
-    (text: string, source: string, eventId?: string) => {
+    (text: string, source: string, eventId?: string, options?: { allowRepeat?: boolean }) => {
       const item: SendQueueItem = {
         id: createId("queue"),
         text,
         source,
         eventId,
+        allowRepeat: options?.allowRepeat,
         status: "pending",
         createdAt: Date.now()
       };
@@ -153,7 +315,7 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   useEffect(() => {
     const stop = adapter.observeInteractionFeed((event) => {
       setEvents((current) => [event, ...current].slice(0, 160));
-      appendLog("event", eventSummary(event));
+      appendLog("event", eventSummary(event), event.userName || "系统", event.type);
 
       if (!runningRef.current) return;
 
@@ -190,7 +352,8 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
       const guard = checkSendGuard({
         text: next.text,
         maxLength: currentProfile.maxReplyLength,
-        lastSentText: lastSentTextRef.current
+        lastSentText: lastSentTextRef.current,
+        allowRepeat: next.allowRepeat
       });
 
       if (!guard.ok) {
@@ -239,7 +402,7 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
         return window.setInterval(() => {
           if (!runningRef.current) return;
           if (action.kind === "barrage") {
-            enqueueBarrage(action.text, `定时弹幕：${action.label}`);
+            enqueueBarrage(action.text, `定时弹幕：${action.label}`, undefined, { allowRepeat: true });
             return;
           }
 
@@ -255,6 +418,10 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
 
   const enabledRuleCount = useMemo(() => profile.rules.filter((rule) => rule.enabled).length, [profile.rules]);
   const pendingQueueCount = useMemo(() => queue.filter((item) => item.status === "pending").length, [queue]);
+  const visibleLogs = useMemo(() => {
+    if (!hideMemberLogEvents) return logs;
+    return logs.filter((entry) => entry.eventType !== "member");
+  }, [hideMemberLogEvents, logs]);
 
   const updateRule = (id: string, patch: Partial<AutomationRule>) => {
     updateProfile((current) => ({
@@ -344,10 +511,20 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
 
   const likeAction = profile.scheduledActions.find((action) => action.kind === "like");
   const timedBarrages = profile.scheduledActions.filter((action) => action.kind === "barrage");
+  const panelStyle = useMemo<CSSProperties>(
+    () => ({
+      left: panelBounds.left,
+      top: panelBounds.top,
+      width: panelBounds.width,
+      height: panelBounds.height
+    }),
+    [panelBounds]
+  );
+  const launcherStyle = useMemo(() => createLauncherStyle(panelBounds), [panelBounds]);
 
   if (!visible) {
     return (
-      <button className="dmw-launcher" type="button" onClick={() => setVisible(true)}>
+      <button className="dmw-launcher" style={launcherStyle} type="button" onClick={() => setVisible(true)}>
         <Activity size={16} />
         房管助手
       </button>
@@ -355,18 +532,21 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   }
 
   return (
-    <aside className="dmw-panel" aria-label="抖音直播间房管助手">
-      <header className="dmw-header">
-        <div>
-          <div className="dmw-title">房管助手</div>
+    <aside className="dmw-panel" style={panelStyle} aria-label="抖音直播间房管助手">
+      <header className="dmw-header" onPointerDown={(event) => beginPanelInteraction("move", event)}>
+        <div className="dmw-title-block">
+          <div className="dmw-title-line">
+            <GripHorizontal className="dmw-drag-icon" size={16} aria-hidden="true" />
+            <div className="dmw-title">房管助手</div>
+          </div>
           <div className="dmw-subtitle">当前直播页 · 本地配置</div>
         </div>
         <div className="dmw-header-actions">
           <span className={`dmw-status ${running ? "is-running" : "is-paused"}`}>
             {running ? "运行中" : "已暂停"}
           </span>
-          <button className="dmw-icon-button" type="button" title="隐藏助手" onClick={() => setVisible(false)}>
-            <X size={16} />
+          <button className="dmw-icon-button" type="button" title="最小化助手" onClick={() => setVisible(false)}>
+            <Minus size={16} />
           </button>
         </div>
       </header>
@@ -650,12 +830,27 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
 
             <div className="dmw-section-heading is-compact">
               <h2>Session Log</h2>
+              <button
+                className={`dmw-secondary-button ${hideMemberLogEvents ? "is-active" : ""}`}
+                type="button"
+                aria-pressed={hideMemberLogEvents}
+                title={hideMemberLogEvents ? "显示进入直播间事件" : "隐藏进入直播间事件"}
+                onClick={() => setHideMemberLogEvents((current) => !current)}
+              >
+                {hideMemberLogEvents ? "显示进房" : "隐藏进房"}
+              </button>
             </div>
             <div className="dmw-log-list">
-              {logs.map((entry) => (
+              {visibleLogs.length === 0 && <div className="dmw-empty">暂无可显示日志</div>}
+              {visibleLogs.map((entry) => (
                 <div className="dmw-log-row" key={entry.id}>
                   <span>{formatTime(entry.timestamp)}</span>
-                  <span className={`dmw-log-kind is-${entry.kind}`}>{logKindLabels[entry.kind]}</span>
+                  <span className={`dmw-log-kind is-${entry.kind}`}>
+                    {entry.eventType ? liveEventLabels[entry.eventType] : logKindLabels[entry.kind]}
+                  </span>
+                  <span className="dmw-log-user" title={entry.userName}>
+                    {entry.userName}
+                  </span>
                   <p>{entry.message}</p>
                 </div>
               ))}
@@ -681,6 +876,13 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
           导出
         </button>
       </footer>
+      <button
+        className="dmw-resize-handle"
+        type="button"
+        aria-label="调整助手大小"
+        title="调整大小"
+        onPointerDown={(event) => beginPanelInteraction("resize", event)}
+      />
     </aside>
   );
 }

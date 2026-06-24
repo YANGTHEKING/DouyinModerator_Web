@@ -36,9 +36,10 @@ function createPreviewAdapter(): PageAdapter {
     },
     {
       type: "chat",
-      userName: "阿宁",
-      content: "主播这款还有库存吗",
-      rawText: "阿宁：主播这款还有库存吗"
+      userName: "吃饱就睡🌠",
+      fanClubName: "孤独星",
+      content: "@awen🌠 实则爽吃郁郁不起来",
+      rawText: "孤独星 吃饱就睡🌠：@awen🌠 实则爽吃郁郁不起来 @awen🌠 @awen🌠"
     },
     {
       type: "gift",
@@ -56,6 +57,12 @@ function createPreviewAdapter(): PageAdapter {
       userName: "晚舟",
       content: "关注主播",
       rawText: "晚舟 关注了主播"
+    },
+    {
+      type: "system",
+      userName: "系统",
+      content: "用户 送出 Q",
+      rawText: "用户 送出 Q"
     }
   ];
 
