@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "抖音直播间房管助手",
+  "description": "在网页端抖音直播间中辅助记录互动、自动回复、定时弹幕和自动点赞。",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "抖音房管助手",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["https://live.douyin.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://live.douyin.com/*"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
