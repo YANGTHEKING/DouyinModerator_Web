@@ -168,6 +168,16 @@ button {
   color: #1f2328;
 }
 
+.dmw-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.dmw-icon-button:disabled:hover {
+  background: transparent;
+  color: #697077;
+}
+
 .dmw-control-band {
   gap: 10px;
   padding: 12px 14px;
@@ -257,6 +267,13 @@ button {
   line-height: 1.2;
 }
 
+.dmw-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .dmw-secondary-button,
 .dmw-quiet-button {
   height: 30px;
@@ -264,6 +281,12 @@ button {
   border: 1px solid rgba(31, 35, 40, 0.1);
   background: #fff;
   color: #343a40;
+}
+
+.dmw-secondary-button:disabled,
+.dmw-quiet-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .dmw-secondary-button.is-active {
@@ -346,6 +369,28 @@ button {
   grid-template-columns: 1fr 96px;
   gap: 8px;
   align-items: end;
+}
+
+.dmw-gift-tier-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(31, 35, 40, 0.08);
+  border-radius: 8px;
+  background: #f7f7f8;
+}
+
+.dmw-gift-tier-title {
+  grid-column: 1 / -1;
+  color: #4d5358;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dmw-gift-tier-field textarea {
+  min-height: 58px;
+  resize: vertical;
 }
 
 .dmw-settings-strip {
@@ -456,12 +501,29 @@ textarea:focus {
   flex-direction: column;
 }
 
+.dmw-inline-setting {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
 .dmw-scheduled-main strong {
   font-size: 13px;
 }
 
 .dmw-small-number {
   width: 84px;
+  flex: 0 0 auto;
+}
+
+.dmw-small-select {
+  width: 74px;
+  flex: 0 0 auto;
+}
+
+.dmw-compact-field {
+  width: auto;
   flex: 0 0 auto;
 }
 

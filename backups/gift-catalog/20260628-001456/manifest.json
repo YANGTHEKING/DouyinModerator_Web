@@ -1,0 +1,22 @@
+{
+  "createdAt": "2026-06-27T16:14:56.373Z",
+  "totalSourceEntries": 609,
+  "totalMergedEntries": 534,
+  "files": [
+    "giftCatalog.generated.ts",
+    "giftCatalog.web.ts",
+    "gift-catalog.normalized.json"
+  ],
+  "sources": [
+    {
+      "file": "src/data/giftCatalog.generated.ts",
+      "sha256": "af06516b7ca5cd50b7fde4545311d9257df2e02580a328d72b5d151e64a7b02c",
+      "count": 488
+    },
+    {
+      "file": "src/data/giftCatalog.web.ts",
+      "sha256": "95d6d69ed0816008f79f0cacbe5f42c7c0e1ebc33d34dfcaf30ca306902ced46",
+      "count": 121
+    }
+  ]
+}

@@ -8,10 +8,11 @@ export function resolveReplyTemplate(template: string, event: LiveEvent): string
     count: typeof event.count === "number" ? String(event.count) : "",
     diamonds: typeof event.giftDiamondCount === "number" ? String(event.giftDiamondCount) : "",
     totalDiamonds: typeof event.giftTotalDiamondCount === "number" ? String(event.giftTotalDiamondCount) : "",
-    content: event.content || ""
+    content: event.content || "",
+    membership: event.content || ""
   };
 
-  return template.replace(/\{(user|fanclub|gift|count|diamonds|totalDiamonds|content)\}/g, (_, key: string) => {
+  return template.replace(/\{(user|fanclub|gift|count|diamonds|totalDiamonds|content|membership)\}/g, (_, key: string) => {
     return replacements[key] ?? "";
   });
 }

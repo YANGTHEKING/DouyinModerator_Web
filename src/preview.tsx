@@ -13,6 +13,9 @@ const support: Record<TriggerType, TriggerSupport> = {
   specificGift: "partial",
   fansclub: "partial",
   like: "partial",
+  monthlyMember: "partial",
+  annualMember: "partial",
+  starGuardian: "partial",
   chatKeyword: "supported"
 };
 
@@ -57,6 +60,12 @@ function createPreviewAdapter(): PageAdapter {
       userName: "晚舟",
       content: "关注主播",
       rawText: "晚舟 关注了主播"
+    },
+    {
+      type: "starGuardian",
+      userName: "星河",
+      content: "开通星守护",
+      rawText: "恭喜星河 开通了星守护"
     },
     {
       type: "system",

@@ -5,6 +5,9 @@ export const TRIGGER_TYPES = [
   "specificGift",
   "fansclub",
   "like",
+  "monthlyMember",
+  "annualMember",
+  "starGuardian",
   "chatKeyword"
 ] as const;
 
@@ -19,9 +22,12 @@ export type LiveEventType =
   | "like"
   | "follow"
   | "fansclub"
+  | "monthlyMember"
+  | "annualMember"
+  | "starGuardian"
   | "system";
 
-export type GiftValueSource = "catalog-name" | "catalog-image" | "page-panel";
+export type GiftValueSource = "catalog-name" | "catalog-image" | "learned-name" | "learned-image" | "page-panel";
 
 export interface LiveEvent {
   id: string;
@@ -47,7 +53,30 @@ export interface AutomationRule {
   trigger: TriggerType;
   matchPattern: string;
   replyTemplate: string;
+  giftReplyTiers?: GiftReplyTier[];
   cooldownSeconds: number;
+  minGiftDiamondCount: number;
+  enabled: boolean;
+}
+
+export interface GiftReplyTier {
+  id: string;
+  replyTemplate: string;
+}
+
+export type TimedBarrageMode = "random" | "sequential";
+
+export interface TimedBarragePool {
+  enabled: boolean;
+  intervalSeconds: number;
+  mode: TimedBarrageMode;
+  items: TimedBarrageItem[];
+}
+
+export interface TimedBarrageItem {
+  id: string;
+  label: string;
+  text: string;
   enabled: boolean;
 }
 
@@ -73,9 +102,11 @@ export interface ScheduledLikeAction {
 export interface AssistantProfile {
   schemaVersion: 1;
   rules: AutomationRule[];
+  timedBarragePool: TimedBarragePool;
   scheduledActions: ScheduledAction[];
   globalSendIntervalSeconds: number;
   maxReplyLength: number;
+  verifyBarrageInputBeforeSend: boolean;
   updatedAt: number;
 }
 
@@ -109,9 +140,13 @@ export interface PageSendResult {
   error?: string;
 }
 
+export interface PageSendOptions {
+  verifyInputWrite?: boolean;
+}
+
 export interface PageAdapter {
   observeInteractionFeed: (onEvent: (event: LiveEvent) => void) => () => void;
-  sendBarrage: (text: string) => Promise<PageSendResult>;
+  sendBarrage: (text: string, options?: PageSendOptions) => Promise<PageSendResult>;
   sendLike: () => Promise<PageSendResult>;
   getTriggerSupport: (trigger: TriggerType) => TriggerSupport;
 }

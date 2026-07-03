@@ -7,6 +7,9 @@ export const triggerLabels: Record<TriggerType, string> = {
   specificGift: "特定礼物",
   fansclub: "加入粉丝团",
   like: "点赞",
+  monthlyMember: "月度会员",
+  annualMember: "年度会员",
+  starGuardian: "星守护",
   chatKeyword: "聊天关键词"
 };
 
@@ -17,6 +20,9 @@ export const liveEventLabels: Record<LiveEventType, string> = {
   like: "点赞",
   follow: "关注",
   fansclub: "入团",
+  monthlyMember: "月会",
+  annualMember: "年会",
+  starGuardian: "星守护",
   system: "系统"
 };
 

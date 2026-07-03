@@ -7,11 +7,15 @@
     "default_title": "抖音房管助手",
     "default_popup": "popup.html"
   },
-  "permissions": ["storage"],
-  "host_permissions": ["https://live.douyin.com/*"],
+  "permissions": ["storage", "debugger"],
+  "host_permissions": ["https://live.douyin.com/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
-      "matches": ["https://live.douyin.com/*"],
+      "matches": ["https://live.douyin.com/*", "http://127.0.0.1/*", "http://localhost/*"],
       "js": ["assets/content.js"],
       "run_at": "document_idle"
     }

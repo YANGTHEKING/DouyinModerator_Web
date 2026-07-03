@@ -1,5 +1,7 @@
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   Download,
   GripHorizontal,
   Heart,
@@ -22,7 +24,9 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { createDefaultProfile } from "../domain/defaultProfile";
+import { GIFT_REPLY_TIER_DEFINITIONS, resolveGiftReplyTemplate } from "../domain/giftReplyTiers";
 import { createId } from "../domain/ids";
+import { checkDouyinLiveStatus, type LiveStatus } from "../domain/liveStatus";
 import {
   liveEventLabels,
   logKindLabels,
@@ -30,17 +34,20 @@ import {
   supportLabels,
   triggerLabels
 } from "../domain/labels";
-import { canFireRule, ruleMatchesEvent } from "../domain/rules";
+import { canFireRule, giftRuleBlockReason, ruleMatchesEvent } from "../domain/rules";
 import { checkSendGuard } from "../domain/sendGuard";
 import { resolveReplyTemplate } from "../domain/templates";
 import {
   AssistantProfile,
   AutomationRule,
+  GiftReplyTier,
   LiveEvent,
   PageAdapter,
   ScheduledAction,
   SendQueueItem,
   SessionLogEntry,
+  TimedBarrageItem,
+  TimedBarrageMode,
   LiveEventType,
   TriggerType,
   TRIGGER_TYPES
@@ -48,6 +55,8 @@ import {
 import { loadProfile, normalizeProfile, saveProfile } from "../storage/profileStorage";
 
 type TabKey = "rules" | "scheduled" | "logs";
+
+type LiveMonitorStatus = "checking" | "live" | "offline" | "unknown";
 
 interface SidebarAppProps {
   adapter: PageAdapter;
@@ -72,6 +81,12 @@ const PANEL_DEFAULT_WIDTH = 420;
 const PANEL_DEFAULT_HEIGHT = 640;
 const PANEL_MIN_WIDTH = 320;
 const PANEL_MIN_HEIGHT = 360;
+const LIVE_MONITOR_INTERVAL_MS = 30_000;
+const LIVE_AUTO_TIMED_BARRAGE_DURATION_MS = 60 * 60 * 1000;
+const LIVE_AUTO_PENDING_KEY = "dmwLiveAutoTimedBarragePending";
+const LIVE_AUTO_EXPIRES_KEY = "dmwLiveAutoTimedBarrageExpiresAt";
+const LIVE_AUTO_HANDLED_KEY = "dmwLiveAutoTimedBarrageHandled";
+const LIVE_AUTO_QUEUE_SOURCE_PREFIX = "开播定时弹幕";
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -145,6 +160,72 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest("button, input, select, textarea, label, a"));
 }
 
+function isGiftTrigger(trigger: TriggerType): boolean {
+  return trigger === "gift" || trigger === "specificGift";
+}
+
+function giftTierTemplate(rule: AutomationRule, tierId: string): string {
+  return rule.giftReplyTiers?.find((tier) => tier.id === tierId)?.replyTemplate ?? "";
+}
+
+function updateGiftTierTemplate(rule: AutomationRule, tierId: string, replyTemplate: string): GiftReplyTier[] {
+  const templates = new Map(rule.giftReplyTiers?.map((tier) => [tier.id, tier.replyTemplate]));
+  templates.set(tierId, replyTemplate);
+
+  return GIFT_REPLY_TIER_DEFINITIONS.map((definition) => ({
+    id: definition.id,
+    replyTemplate: templates.get(definition.id) ?? ""
+  }));
+}
+
+function pickRandomTimedBarrage(items: TimedBarrageItem[], previousItemId: string | undefined): TimedBarrageItem | undefined {
+  if (items.length === 0) return undefined;
+  const candidates = items.length > 1 ? items.filter((item) => item.id !== previousItemId) : items;
+  const pool = candidates.length ? candidates : items;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function pickSequentialTimedBarrage(items: TimedBarrageItem[], previousItemId: string | undefined): TimedBarrageItem | undefined {
+  if (items.length === 0) return undefined;
+  const previousIndex = previousItemId ? items.findIndex((item) => item.id === previousItemId) : -1;
+  return items[(previousIndex + 1) % items.length];
+}
+
+function readLiveAutoTimedBarrageExpiresAt(): number | undefined {
+  const raw = window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY);
+  const value = raw ? Number(raw) : undefined;
+  return value && value > Date.now() ? value : undefined;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function liveMonitorLabel(status: LiveMonitorStatus): string {
+  if (status === "live") return "已开播";
+  if (status === "offline") return "未开播";
+  if (status === "checking") return "检测中";
+  return "未知";
+}
+
+function isLiveAutoTimedBarrageQueueItem(item: SendQueueItem): boolean {
+  return item.source.startsWith(LIVE_AUTO_QUEUE_SOURCE_PREFIX);
+}
+
+function isTimedBarrageQueueItem(item: SendQueueItem): boolean {
+  return (
+    isLiveAutoTimedBarrageQueueItem(item) ||
+    item.source.startsWith("定时弹幕随机：") ||
+    item.source.startsWith("定时弹幕顺序：") ||
+    item.source.startsWith("定时弹幕：")
+  );
+}
+
 export function SidebarApp({ adapter }: SidebarAppProps) {
   const [visible, setVisible] = useState(true);
   const [activeTab, setActiveTab] = useState<TabKey>("rules");
@@ -155,7 +236,13 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [logs, setLogs] = useState<SessionLogEntry[]>([]);
   const [queue, setQueue] = useState<SendQueueItem[]>([]);
-  const [hideMemberLogEvents, setHideMemberLogEvents] = useState(false);
+  const [hideMemberLogEvents, setHideMemberLogEvents] = useState(true);
+  const [hideLikeLogEvents, setHideLikeLogEvents] = useState(true);
+  const [liveMonitorStatus, setLiveMonitorStatus] = useState<LiveMonitorStatus>("checking");
+  const [liveAutoTimedBarrageExpiresAt, setLiveAutoTimedBarrageExpiresAt] = useState<number | undefined>(
+    readLiveAutoTimedBarrageExpiresAt
+  );
+  const [liveAutoCountdownNow, setLiveAutoCountdownNow] = useState(Date.now());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profileRef = useRef(profile);
@@ -164,11 +251,24 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   const lastRuleFiredRef = useRef(new Map<string, number>());
   const lastBarrageAtRef = useRef(0);
   const lastSentTextRef = useRef<string | undefined>(undefined);
+  const lastTimedBarrageItemRef = useRef<string | undefined>(undefined);
   const processingRef = useRef(false);
   const panelBoundsRef = useRef(panelBounds);
   const panelInteractionRef = useRef<PanelInteraction | null>(null);
   const bodyCursorRef = useRef("");
   const bodyUserSelectRef = useRef("");
+  const lastLiveStatusRef = useRef<LiveStatus | undefined>(undefined);
+  const liveAutoTimedBarrageActiveRef = useRef(false);
+
+  const liveAutoTimedBarrageActive = Boolean(
+    liveAutoTimedBarrageExpiresAt && liveAutoTimedBarrageExpiresAt > liveAutoCountdownNow
+  );
+  const liveAutoTimedBarrageRemainingMs =
+    liveAutoTimedBarrageActive && liveAutoTimedBarrageExpiresAt
+      ? Math.max(0, liveAutoTimedBarrageExpiresAt - liveAutoCountdownNow)
+      : 0;
+  const liveMonitorSupportTone =
+    liveMonitorStatus === "live" ? "supported" : liveMonitorStatus === "offline" ? "pending" : "partial";
 
   useEffect(() => {
     panelBoundsRef.current = panelBounds;
@@ -274,6 +374,53 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
     setProfile((current) => ({ ...updater(current), updatedAt: Date.now() }));
   }, []);
 
+  const startLiveAutoTimedBarrage = useCallback(
+    (reason: string, shouldRefresh: boolean) => {
+      const expiresAt = Date.now() + LIVE_AUTO_TIMED_BARRAGE_DURATION_MS;
+      window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
+      window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
+      setLiveAutoTimedBarrageExpiresAt(expiresAt);
+      setLiveAutoCountdownNow(Date.now());
+
+      if (shouldRefresh) {
+        window.sessionStorage.setItem(LIVE_AUTO_PENDING_KEY, String(expiresAt));
+        window.location.reload();
+        return;
+      }
+
+      appendLog("assistant", `检测到直播开播，已开启 1 小时定时弹幕池窗口：${reason}`);
+    },
+    [appendLog]
+  );
+
+  const clearPendingLiveAutoTimedBarrageQueue = useCallback(() => {
+    setQueue((current) =>
+      current.filter((item) => !(item.status === "pending" && isLiveAutoTimedBarrageQueueItem(item)))
+    );
+  }, []);
+
+  const clearPendingTimedBarrageQueue = useCallback(() => {
+    setQueue((current) => current.filter((item) => !(item.status === "pending" && isTimedBarrageQueueItem(item))));
+  }, []);
+
+  const stopLiveAutoTimedBarrage = useCallback(
+    (message: string) => {
+      const hadAutoWindow = Boolean(
+        liveAutoTimedBarrageActiveRef.current ||
+          window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY)
+      );
+      window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
+      window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
+      setLiveAutoTimedBarrageExpiresAt(undefined);
+      setLiveAutoCountdownNow(Date.now());
+      liveAutoTimedBarrageActiveRef.current = false;
+      clearPendingLiveAutoTimedBarrageQueue();
+      if (hadAutoWindow) appendLog("assistant", message);
+    },
+    [appendLog, clearPendingLiveAutoTimedBarrageQueue]
+  );
+
   useEffect(() => {
     let cancelled = false;
     loadProfile().then((loadedProfile) => {
@@ -294,6 +441,90 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [profile, profileReady]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setLiveAutoCountdownNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pending = Number(window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) || "");
+    if (!pending || pending <= Date.now()) return;
+
+    window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
+    window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
+    window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(pending));
+    setLiveAutoTimedBarrageExpiresAt(pending);
+    setLiveAutoCountdownNow(Date.now());
+    appendLog("assistant", "开播刷新完成，已开启 1 小时定时弹幕池窗口");
+  }, [appendLog]);
+
+  useEffect(() => {
+    liveAutoTimedBarrageActiveRef.current = liveAutoTimedBarrageActive;
+    if (liveAutoTimedBarrageActive || liveAutoTimedBarrageExpiresAt === undefined) return;
+
+    window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
+    setLiveAutoTimedBarrageExpiresAt(undefined);
+    updateProfile((current) => ({
+      ...current,
+      timedBarragePool: {
+        ...current.timedBarragePool,
+        enabled: false
+      }
+    }));
+    clearPendingTimedBarrageQueue();
+    appendLog("assistant", "1 小时开播定时弹幕窗口已结束，已关闭定时弹幕池开关并清理未发送的定时弹幕");
+  }, [
+    appendLog,
+    clearPendingTimedBarrageQueue,
+    liveAutoTimedBarrageActive,
+    liveAutoTimedBarrageExpiresAt,
+    updateProfile
+  ]);
+
+  useEffect(() => {
+    let disposed = false;
+    let checking = false;
+
+    const runCheck = async () => {
+      if (checking) return;
+      checking = true;
+      setLiveMonitorStatus("checking");
+
+      const snapshot = await checkDouyinLiveStatus();
+      checking = false;
+      if (disposed) return;
+
+      setLiveMonitorStatus(snapshot.status);
+      const previousStatus = lastLiveStatusRef.current;
+      lastLiveStatusRef.current = snapshot.status;
+
+      if (snapshot.status === "offline") {
+        window.sessionStorage.removeItem(LIVE_AUTO_HANDLED_KEY);
+        stopLiveAutoTimedBarrage("检测到直播未开播，已关闭开播定时弹幕窗口");
+        return;
+      }
+
+      if (snapshot.status !== "live") return;
+      const hasHandledCurrentLive = window.sessionStorage.getItem(LIVE_AUTO_HANDLED_KEY) === "1";
+      const reason = snapshot.detail ?? snapshot.source;
+      if (previousStatus === "offline") {
+        startLiveAutoTimedBarrage(reason, true);
+        return;
+      }
+
+      if (!hasHandledCurrentLive && !liveAutoTimedBarrageActiveRef.current) {
+        startLiveAutoTimedBarrage(reason, true);
+      }
+    };
+
+    void runCheck();
+    const timer = window.setInterval(() => void runCheck(), LIVE_MONITOR_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [startLiveAutoTimedBarrage, stopLiveAutoTimedBarrage]);
 
   const enqueueBarrage = useCallback(
     (text: string, source: string, eventId?: string, options?: { allowRepeat?: boolean }) => {
@@ -317,12 +548,30 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
       setEvents((current) => [event, ...current].slice(0, 160));
       appendLog("event", eventSummary(event), event.userName || "系统", event.type);
 
-      if (!runningRef.current) return;
+      const currentProfile = profileRef.current;
+      if (!runningRef.current) {
+        if (event.type === "gift") {
+          for (const rule of currentProfile.rules) {
+            const blockReason = giftRuleBlockReason(rule, event);
+            if (blockReason) {
+              appendLog("warning", `预检规则「${rule.name}」未触发：${blockReason}`, event.userName, event.type);
+              continue;
+            }
+            if (ruleMatchesEvent(rule, event)) {
+              appendLog("assistant", `预检规则「${rule.name}」会触发，助手已暂停，未加入发送队列`, event.userName, event.type);
+            }
+          }
+        }
+        return;
+      }
 
       const now = Date.now();
-      const currentProfile = profileRef.current;
       for (const rule of currentProfile.rules) {
-        if (!ruleMatchesEvent(rule, event)) continue;
+        const blockReason = giftRuleBlockReason(rule, event);
+        if (!ruleMatchesEvent(rule, event)) {
+          if (blockReason) appendLog("warning", `规则「${rule.name}」未触发：${blockReason}`, event.userName, event.type);
+          continue;
+        }
         const support = adapter.getTriggerSupport(rule.trigger);
         if (support === "pending") {
           appendLog("warning", `规则「${rule.name}」的触发条件暂未适配当前页面`);
@@ -330,7 +579,7 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
         }
         if (!canFireRule(rule, lastRuleFiredRef.current.get(rule.id), now)) continue;
         lastRuleFiredRef.current.set(rule.id, now);
-        enqueueBarrage(resolveReplyTemplate(rule.replyTemplate, event), `规则：${rule.name}`, event.id);
+        enqueueBarrage(resolveReplyTemplate(resolveGiftReplyTemplate(rule, event), event), `规则：${rule.name}`, event.id);
       }
     });
 
@@ -339,11 +588,17 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
-      if (!runningRef.current || processingRef.current) return;
+      const autoTimedActive = liveAutoTimedBarrageActiveRef.current;
+      if ((!runningRef.current && !autoTimedActive) || processingRef.current) return;
       const currentProfile = profileRef.current;
       if (Date.now() - lastBarrageAtRef.current < currentProfile.globalSendIntervalSeconds * 1000) return;
 
-      const next = queueRef.current.find((item) => item.status === "pending");
+      const next = queueRef.current.find((item) => {
+        if (item.status !== "pending") return false;
+        if (isLiveAutoTimedBarrageQueueItem(item)) return autoTimedActive;
+        if (isTimedBarrageQueueItem(item)) return runningRef.current && currentProfile.timedBarragePool.enabled;
+        return runningRef.current;
+      });
       if (!next) return;
 
       processingRef.current = true;
@@ -367,15 +622,13 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
         return;
       }
 
-      const result = await adapter.sendBarrage(guard.text);
+      const result = await adapter.sendBarrage(guard.text, {
+        verifyInputWrite: currentProfile.verifyBarrageInputBeforeSend
+      });
       if (result.ok) {
         lastBarrageAtRef.current = Date.now();
         lastSentTextRef.current = guard.text;
-        setQueue((current) =>
-          current.map((item) =>
-            item.id === next.id ? { ...item, status: "sent", sentAt: Date.now() } : item
-          )
-        );
+        setQueue((current) => current.filter((item) => item.id !== next.id));
         appendLog("send", `已发送弹幕：${guard.text}`);
       } else {
         setQueue((current) =>
@@ -393,35 +646,67 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   }, [adapter, appendLog]);
 
   useEffect(() => {
-    if (!running) return;
+    if (!running && !liveAutoTimedBarrageActive) return;
 
-    const timers = profile.scheduledActions
-      .filter((action) => action.enabled)
-      .map((action) => {
-        const intervalSeconds = Math.max(30, action.intervalSeconds);
-        return window.setInterval(() => {
+    const timers: number[] = [];
+    const pool = profile.timedBarragePool;
+
+    if (pool.enabled || liveAutoTimedBarrageActive) {
+      const intervalSeconds = Math.max(30, pool.intervalSeconds);
+      timers.push(
+        window.setInterval(() => {
+          const autoTimedActive = liveAutoTimedBarrageActiveRef.current;
+          if (!runningRef.current && !autoTimedActive) return;
+          const currentPool = profileRef.current.timedBarragePool;
+          if (!currentPool.enabled && !autoTimedActive) return;
+          const items = currentPool.items.filter((item) => item.enabled && item.text.trim());
+          const next =
+            currentPool.mode === "sequential"
+              ? pickSequentialTimedBarrage(items, lastTimedBarrageItemRef.current)
+              : pickRandomTimedBarrage(items, lastTimedBarrageItemRef.current);
+          if (!next) return;
+
+          lastTimedBarrageItemRef.current = next.id;
+          enqueueBarrage(
+            next.text,
+            autoTimedActive && !currentPool.enabled
+              ? `${LIVE_AUTO_QUEUE_SOURCE_PREFIX}：${next.label}`
+              : currentPool.mode === "sequential"
+                ? `定时弹幕顺序：${next.label}`
+                : `定时弹幕随机：${next.label}`,
+            undefined,
+            { allowRepeat: true }
+          );
+        }, intervalSeconds * 1000)
+      );
+    }
+
+    for (const action of profile.scheduledActions.filter((action) => action.enabled)) {
+      if (action.kind !== "like") continue;
+      const intervalSeconds = Math.max(30, action.intervalSeconds);
+      timers.push(
+        window.setInterval(() => {
           if (!runningRef.current) return;
-          if (action.kind === "barrage") {
-            enqueueBarrage(action.text, `定时弹幕：${action.label}`, undefined, { allowRepeat: true });
-            return;
-          }
-
           adapter.sendLike().then((result) => {
             if (result.ok) appendLog("send", "已执行自动点赞");
             else appendLog("error", `自动点赞失败：${result.error ?? "未知错误"}`);
           });
-        }, intervalSeconds * 1000);
-      });
+        }, intervalSeconds * 1000)
+      );
+    }
 
     return () => timers.forEach((timer) => window.clearInterval(timer));
-  }, [adapter, appendLog, enqueueBarrage, profile.scheduledActions, running]);
+  }, [adapter, appendLog, enqueueBarrage, liveAutoTimedBarrageActive, profile.scheduledActions, profile.timedBarragePool, running]);
 
   const enabledRuleCount = useMemo(() => profile.rules.filter((rule) => rule.enabled).length, [profile.rules]);
   const pendingQueueCount = useMemo(() => queue.filter((item) => item.status === "pending").length, [queue]);
   const visibleLogs = useMemo(() => {
-    if (!hideMemberLogEvents) return logs;
-    return logs.filter((entry) => entry.eventType !== "member");
-  }, [hideMemberLogEvents, logs]);
+    return logs.filter((entry) => {
+      if (hideMemberLogEvents && entry.eventType === "member") return false;
+      if (hideLikeLogEvents && entry.eventType === "like") return false;
+      return true;
+    });
+  }, [hideLikeLogEvents, hideMemberLogEvents, logs]);
 
   const updateRule = (id: string, patch: Partial<AutomationRule>) => {
     updateProfile((current) => ({
@@ -442,6 +727,7 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
           matchPattern: "*",
           replyTemplate: "欢迎 {user}！",
           cooldownSeconds: 10,
+          minGiftDiamondCount: 0,
           enabled: false
         }
       ]
@@ -461,21 +747,73 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
     }));
   };
 
+  const updateTimedBarragePool = (
+    patch: Partial<Pick<AssistantProfile["timedBarragePool"], "enabled" | "intervalSeconds" | "mode">>
+  ) => {
+    updateProfile((current) => ({
+      ...current,
+      timedBarragePool: {
+        ...current.timedBarragePool,
+        ...patch
+      }
+    }));
+    if (patch.enabled === false) clearPendingTimedBarrageQueue();
+  };
+
+  const updateTimedBarrageItem = (id: string, patch: Partial<TimedBarrageItem>) => {
+    updateProfile((current) => ({
+      ...current,
+      timedBarragePool: {
+        ...current.timedBarragePool,
+        items: current.timedBarragePool.items.map((item) => (item.id === id ? { ...item, ...patch } : item))
+      }
+    }));
+  };
+
   const addTimedBarrage = () => {
     updateProfile((current) => ({
       ...current,
-      scheduledActions: [
-        ...current.scheduledActions,
-        {
-          id: createId("scheduled"),
-          kind: "barrage",
-          label: "定时弹幕",
-          text: "欢迎大家关注主播～",
-          intervalSeconds: 120,
-          enabled: false
-        }
-      ]
+      timedBarragePool: {
+        ...current.timedBarragePool,
+        items: [
+          ...current.timedBarragePool.items,
+          {
+            id: createId("timed_barrage"),
+            label: "定时弹幕",
+            text: "欢迎大家关注主播～",
+            enabled: true
+          }
+        ]
+      }
     }));
+  };
+
+  const deleteTimedBarrage = (id: string) => {
+    updateProfile((current) => ({
+      ...current,
+      timedBarragePool: {
+        ...current.timedBarragePool,
+        items: current.timedBarragePool.items.filter((item) => item.id !== id)
+      }
+    }));
+  };
+
+  const moveTimedBarrage = (id: string, direction: -1 | 1) => {
+    updateProfile((current) => {
+      const items = [...current.timedBarragePool.items];
+      const index = items.findIndex((item) => item.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return current;
+      const [item] = items.splice(index, 1);
+      items.splice(nextIndex, 0, item);
+      return {
+        ...current,
+        timedBarragePool: {
+          ...current.timedBarragePool,
+          items
+        }
+      };
+    });
   };
 
   const deleteScheduledAction = (id: string) => {
@@ -510,7 +848,9 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
   };
 
   const likeAction = profile.scheduledActions.find((action) => action.kind === "like");
-  const timedBarrages = profile.scheduledActions.filter((action) => action.kind === "barrage");
+  const timedBarragePool = profile.timedBarragePool;
+  const timedBarrages = timedBarragePool.items;
+  const timedBarragePoolActive = timedBarragePool.enabled || liveAutoTimedBarrageActive;
   const panelStyle = useMemo<CSSProperties>(
     () => ({
       left: panelBounds.left,
@@ -650,11 +990,10 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
                           min={0}
                           max={3600}
                           value={rule.cooldownSeconds}
-                          onChange={(event) =>
-                            updateRule(rule.id, {
-                              cooldownSeconds: clampNumber(Number(event.currentTarget.value), 0, 3600)
-                            })
-                          }
+                          onChange={(event) => {
+                            const cooldownSeconds = clampNumber(Number(event.currentTarget.value), 0, 3600);
+                            updateRule(rule.id, { cooldownSeconds });
+                          }}
                         />
                       </label>
                     </div>
@@ -665,6 +1004,40 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
                         onChange={(event) => updateRule(rule.id, { matchPattern: event.currentTarget.value })}
                       />
                     </label>
+                    {isGiftTrigger(rule.trigger) && (
+                      <>
+                        <label className="dmw-field">
+                          <span>感谢门槛（钻）</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100000000}
+                            value={rule.minGiftDiamondCount}
+                            onChange={(event) => {
+                              const minGiftDiamondCount = clampNumber(Number(event.currentTarget.value), 0, 100000000);
+                              updateRule(rule.id, { minGiftDiamondCount });
+                            }}
+                          />
+                        </label>
+                        <div className="dmw-gift-tier-list">
+                          <div className="dmw-gift-tier-title">分档感谢</div>
+                          {GIFT_REPLY_TIER_DEFINITIONS.map((tier) => (
+                            <label className="dmw-gift-tier-field" key={tier.id}>
+                              <span>{tier.label}</span>
+                              <textarea
+                                rows={2}
+                                value={giftTierTemplate(rule, tier.id)}
+                                onChange={(event) =>
+                                  updateRule(rule.id, {
+                                    giftReplyTiers: updateGiftTierTemplate(rule, tier.id, event.currentTarget.value)
+                                  })
+                                }
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </>
+                    )}
                     <label className="dmw-field">
                       <span>回复模板</span>
                       <textarea
@@ -698,12 +1071,13 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
                   min={5}
                   max={300}
                   value={profile.globalSendIntervalSeconds}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const globalSendIntervalSeconds = clampNumber(Number(event.currentTarget.value), 5, 300);
                     updateProfile((current) => ({
                       ...current,
-                      globalSendIntervalSeconds: clampNumber(Number(event.currentTarget.value), 5, 300)
-                    }))
-                  }
+                      globalSendIntervalSeconds
+                    }));
+                  }}
                 />
               </label>
               <label>
@@ -713,13 +1087,94 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
                   min={1}
                   max={200}
                   value={profile.maxReplyLength}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const maxReplyLength = clampNumber(Number(event.currentTarget.value), 1, 200);
                     updateProfile((current) => ({
                       ...current,
-                      maxReplyLength: clampNumber(Number(event.currentTarget.value), 1, 200)
-                    }))
+                      maxReplyLength
+                    }));
+                  }}
+                />
+              </label>
+              <div className="dmw-inline-setting">
+                <label className="dmw-switch">
+                  <input
+                    type="checkbox"
+                    checked={profile.verifyBarrageInputBeforeSend}
+                    onChange={(event) => {
+                      const verifyBarrageInputBeforeSend = event.currentTarget.checked;
+                      updateProfile((current) => ({
+                        ...current,
+                        verifyBarrageInputBeforeSend
+                      }));
+                    }}
+                  />
+                  <span />
+                </label>
+                <div className="dmw-scheduled-main">
+                  <strong>写入校验</strong>
+                  <span>{profile.verifyBarrageInputBeforeSend ? "发送前确认输入框内容一致" : "跳过读回检查直接发送"}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="dmw-scheduled-row">
+              <div className="dmw-scheduled-main">
+                <strong>开播监控</strong>
+                <span>
+                  {liveMonitorLabel(liveMonitorStatus)} · 每 {Math.round(LIVE_MONITOR_INTERVAL_MS / 1000)} 秒检测
+                  {liveAutoTimedBarrageActive
+                    ? ` · 定时弹幕窗口 ${formatDuration(liveAutoTimedBarrageRemainingMs)}`
+                    : ""}
+                </span>
+              </div>
+              <span className={`dmw-support is-${liveMonitorSupportTone}`}>
+                {liveAutoTimedBarrageActive ? "自动中" : liveMonitorLabel(liveMonitorStatus)}
+              </span>
+            </div>
+
+            <div className="dmw-scheduled-row">
+              <label className="dmw-switch">
+                <input
+                  type="checkbox"
+                  checked={timedBarragePool.enabled}
+                  onChange={(event) => updateTimedBarragePool({ enabled: event.currentTarget.checked })}
+                />
+                <span />
+              </label>
+              <div className="dmw-scheduled-main">
+                <strong>定时弹幕池</strong>
+                <span>
+                  {timedBarrages.filter((item) => item.enabled).length}/{timedBarrages.length} 条启用
+                  {timedBarragePoolActive && !timedBarragePool.enabled ? " · 开播窗口临时开启" : ""}
+                </span>
+              </div>
+              <label className="dmw-compact-field">
+                <span>间隔</span>
+                <input
+                  className="dmw-small-number"
+                  type="number"
+                  min={30}
+                  value={timedBarragePool.intervalSeconds}
+                  onChange={(event) =>
+                    updateTimedBarragePool({
+                      intervalSeconds: clampNumber(Number(event.currentTarget.value), 30, 86400)
+                    })
                   }
                 />
+              </label>
+              <label className="dmw-compact-field">
+                <span>模式</span>
+                <select
+                  className="dmw-small-select"
+                  value={timedBarragePool.mode}
+                  onChange={(event) =>
+                    updateTimedBarragePool({ mode: event.currentTarget.value as TimedBarrageMode })
+                  }
+                >
+                  <option value="random">随机</option>
+                  <option value="sequential">顺序</option>
+                </select>
               </label>
             </div>
 
@@ -752,53 +1207,56 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
             )}
 
             <div className="dmw-rule-list">
-              {timedBarrages.map((action) => (
-                <div className="dmw-rule-row" key={action.id}>
+              {timedBarrages.length === 0 && <div className="dmw-empty">暂无定时弹幕</div>}
+              {timedBarrages.map((item, index) => (
+                <div className="dmw-rule-row" key={item.id}>
                   <div className="dmw-row-topline">
                     <label className="dmw-switch">
                       <input
                         type="checkbox"
-                        checked={action.enabled}
-                        onChange={(event) => updateScheduledAction(action.id, { enabled: event.currentTarget.checked })}
+                        checked={item.enabled}
+                        onChange={(event) => updateTimedBarrageItem(item.id, { enabled: event.currentTarget.checked })}
                       />
                       <span />
                     </label>
                     <input
                       className="dmw-rule-name"
-                      value={action.label}
-                      onChange={(event) => updateScheduledAction(action.id, { label: event.currentTarget.value })}
+                      value={item.label}
+                      onChange={(event) => updateTimedBarrageItem(item.id, { label: event.currentTarget.value })}
                     />
                     <button
                       className="dmw-icon-button"
                       type="button"
+                      title="上移"
+                      disabled={index === 0}
+                      onClick={() => moveTimedBarrage(item.id, -1)}
+                    >
+                      <ArrowUp size={15} />
+                    </button>
+                    <button
+                      className="dmw-icon-button"
+                      type="button"
+                      title="下移"
+                      disabled={index === timedBarrages.length - 1}
+                      onClick={() => moveTimedBarrage(item.id, 1)}
+                    >
+                      <ArrowDown size={15} />
+                    </button>
+                    <button
+                      className="dmw-icon-button"
+                      type="button"
                       title="删除定时弹幕"
-                      onClick={() => deleteScheduledAction(action.id)}
+                      onClick={() => deleteTimedBarrage(item.id)}
                     >
                       <Trash2 size={15} />
                     </button>
-                  </div>
-                  <div className="dmw-grid-two">
-                    <label>
-                      <span>间隔</span>
-                      <input
-                        type="number"
-                        min={30}
-                        value={action.intervalSeconds}
-                        onChange={(event) =>
-                          updateScheduledAction(action.id, {
-                            intervalSeconds: clampNumber(Number(event.currentTarget.value), 30, 86400)
-                          })
-                        }
-                      />
-                    </label>
-                    <span className="dmw-muted">默认建议 120 秒</span>
                   </div>
                   <label className="dmw-field">
                     <span>弹幕内容</span>
                     <textarea
                       rows={2}
-                      value={action.text}
-                      onChange={(event) => updateScheduledAction(action.id, { text: event.currentTarget.value })}
+                      value={item.text}
+                      onChange={(event) => updateTimedBarrageItem(item.id, { text: event.currentTarget.value })}
                     />
                   </label>
                 </div>
@@ -830,15 +1288,26 @@ export function SidebarApp({ adapter }: SidebarAppProps) {
 
             <div className="dmw-section-heading is-compact">
               <h2>Session Log</h2>
-              <button
-                className={`dmw-secondary-button ${hideMemberLogEvents ? "is-active" : ""}`}
-                type="button"
-                aria-pressed={hideMemberLogEvents}
-                title={hideMemberLogEvents ? "显示进入直播间事件" : "隐藏进入直播间事件"}
-                onClick={() => setHideMemberLogEvents((current) => !current)}
-              >
-                {hideMemberLogEvents ? "显示进房" : "隐藏进房"}
-              </button>
+              <div className="dmw-heading-actions">
+                <button
+                  className={`dmw-secondary-button ${hideMemberLogEvents ? "is-active" : ""}`}
+                  type="button"
+                  aria-pressed={hideMemberLogEvents}
+                  title={hideMemberLogEvents ? "显示进入直播间事件" : "隐藏进入直播间事件"}
+                  onClick={() => setHideMemberLogEvents((current) => !current)}
+                >
+                  {hideMemberLogEvents ? "显示进房" : "隐藏进房"}
+                </button>
+                <button
+                  className={`dmw-secondary-button ${hideLikeLogEvents ? "is-active" : ""}`}
+                  type="button"
+                  aria-pressed={hideLikeLogEvents}
+                  title={hideLikeLogEvents ? "显示点赞事件" : "隐藏点赞事件"}
+                  onClick={() => setHideLikeLogEvents((current) => !current)}
+                >
+                  {hideLikeLogEvents ? "显示点赞" : "隐藏点赞"}
+                </button>
+              </div>
             </div>
             <div className="dmw-log-list">
               {visibleLogs.length === 0 && <div className="dmw-empty">暂无可显示日志</div>}
