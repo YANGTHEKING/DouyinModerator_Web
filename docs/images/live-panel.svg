@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="700" viewBox="0 0 1120 700" role="img" aria-labelledby="title desc">
+  <title id="title">直播间侧边栏示意</title>
+  <desc id="desc">打开目标抖音直播间后，右侧出现小光Ray房管助手面板。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#1f2937" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+  <rect width="1120" height="700" fill="#f4f7fb"/>
+  <rect x="70" y="58" width="980" height="584" rx="18" fill="#ffffff" filter="url(#shadow)"/>
+  <rect x="70" y="58" width="980" height="58" rx="18" fill="#111827"/>
+  <text x="104" y="94" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17" fill="#e5e7eb">https://live.douyin.com/730660348009</text>
+  <rect x="106" y="146" width="594" height="448" rx="16" fill="#18181b"/>
+  <rect x="134" y="176" width="538" height="302" rx="14" fill="#27272a"/>
+  <text x="320" y="336" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="28" font-weight="700" fill="#f8fafc">直播画面</text>
+  <rect x="134" y="502" width="538" height="54" rx="10" fill="#111827" stroke="#3f3f46"/>
+  <text x="162" y="536" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17" fill="#d4d4d8">这里是弹幕输入区</text>
+  <rect x="730" y="136" width="286" height="476" rx="16" fill="#f8fafc" stroke="#d7dee8"/>
+  <rect x="752" y="158" width="242" height="52" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="772" y="190" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="18" font-weight="700" fill="#111827">小光Ray房管助手</text>
+  <rect x="752" y="226" width="242" height="44" rx="10" fill="#dcfce7" stroke="#86efac"/>
+  <text x="774" y="254" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" font-weight="700" fill="#166534">运行托管</text>
+  <rect x="910" y="237" width="54" height="22" rx="11" fill="#22c55e"/>
+  <circle cx="953" cy="248" r="9" fill="#ffffff"/>
+  <rect x="752" y="286" width="74" height="34" rx="8" fill="#2563eb"/>
+  <text x="775" y="308" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" font-weight="700" fill="#ffffff">规则</text>
+  <rect x="836" y="286" width="74" height="34" rx="8" fill="#e5e7eb"/>
+  <text x="858" y="308" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" fill="#374151">定时</text>
+  <rect x="920" y="286" width="74" height="34" rx="8" fill="#e5e7eb"/>
+  <text x="942" y="308" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" fill="#374151">日志</text>
+  <rect x="752" y="340" width="242" height="76" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="774" y="370" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" font-weight="700" fill="#111827">欢迎新进观众</text>
+  <text x="774" y="396" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="14" fill="#64748b">进入房间后自动欢迎</text>
+  <rect x="752" y="432" width="242" height="76" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="774" y="462" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" font-weight="700" fill="#111827">定时弹幕倒计时</text>
+  <text x="774" y="488" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="14" fill="#64748b">剩余 04:30</text>
+  <rect x="908" y="454" width="64" height="30" rx="8" fill="#f1f5f9"/>
+  <text x="925" y="474" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="14" fill="#334155">重置</text>
+  <rect x="752" y="524" width="112" height="42" rx="10" fill="#2563eb"/>
+  <text x="775" y="551" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" font-weight="700" fill="#ffffff">立即发送</text>
+  <rect x="882" y="524" width="112" height="42" rx="10" fill="#111827"/>
+  <text x="907" y="551" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" font-weight="700" fill="#ffffff">AI 生成</text>
+  <circle cx="708" cy="248" r="20" fill="#f97316"/>
+  <text x="701" y="255" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="19" font-weight="700" fill="#ffffff">1</text>
+  <path d="M728 248 L752 248" stroke="#f97316" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="708" cy="545" r="20" fill="#f97316"/>
+  <text x="701" y="552" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="19" font-weight="700" fill="#ffffff">2</text>
+  <path d="M728 545 L752 545" stroke="#f97316" stroke-width="5" stroke-linecap="round"/>
+</svg>

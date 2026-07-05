@@ -311,6 +311,13 @@ button {
   color: #bd123c;
 }
 
+.dmw-countdown-reset-button {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
 .dmw-rule-list,
 .dmw-queue-list,
 .dmw-log-list {
@@ -561,9 +568,14 @@ textarea:focus {
   gap: 10px;
 }
 
-.dmw-ai-style-select {
-  width: 108px;
-  flex: 0 0 auto;
+.dmw-ai-barrage-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dmw-ai-select {
+  width: 100%;
 }
 
 .dmw-ai-barrage-text {

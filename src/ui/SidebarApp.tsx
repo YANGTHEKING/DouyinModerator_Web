@@ -12,6 +12,7 @@ import {
   Play,
   Plus,
   RefreshCcw,
+  Send,
   Sparkles,
   Trash2,
   Upload
@@ -27,9 +28,18 @@ import {
 } from "react";
 import { createDefaultProfile } from "../domain/defaultProfile";
 import {
-  AI_TIMED_BARRAGE_STYLES,
+  AI_TIMED_BARRAGE_INTENTS,
+  AI_TIMED_BARRAGE_TOPIC_CATEGORIES,
+  AI_TIMED_BARRAGE_TOPIC_FRESHNESS,
+  AI_TIMED_BARRAGE_TOPIC_TARGETS,
   cleanAiTimedBarrageText,
-  type AiTimedBarrageStyleId
+  getAiTimedBarrageStyles,
+  shouldUseAiTimedBarrageWebSearch,
+  type AiTimedBarrageIntentId,
+  type AiTimedBarrageStyleId,
+  type AiTimedBarrageTopicCategoryId,
+  type AiTimedBarrageTopicFreshnessId,
+  type AiTimedBarrageTopicTargetId
 } from "../domain/aiTimedBarrage";
 import { GIFT_REPLY_TIER_DEFINITIONS, resolveGiftReplyTemplate } from "../domain/giftReplyTiers";
 import { createId } from "../domain/ids";
@@ -106,6 +116,7 @@ const PANEL_DEFAULT_WIDTH = 420;
 const PANEL_DEFAULT_HEIGHT = 640;
 const PANEL_MIN_WIDTH = 320;
 const PANEL_MIN_HEIGHT = 360;
+const ASSISTANT_TITLE = "小光Ray房管助手";
 const DEFAULT_AUTOMATION_TIMINGS: SidebarAutomationTimings = {
   liveMonitorIntervalMs: 30_000,
   liveAutoTimedBarrageDurationMs: 60 * 60 * 1000,
@@ -192,6 +203,10 @@ function createLauncherStyle(bounds: PanelBounds): CSSProperties {
     left: clampNumber(bounds.left, PANEL_EDGE_PADDING, Math.max(PANEL_EDGE_PADDING, window.innerWidth - 150)),
     top: clampNumber(bounds.top, PANEL_EDGE_PADDING, Math.max(PANEL_EDGE_PADDING, window.innerHeight - 54))
   };
+}
+
+function reloadWindow(): void {
+  window.location.reload();
 }
 
 function isInteractiveTarget(target: EventTarget | null): boolean {
@@ -302,7 +317,7 @@ export function SidebarApp({
   adapter,
   automationTimings,
   liveStatusChecker = checkDouyinLiveStatus,
-  requestReload = () => window.location.reload()
+  requestReload = reloadWindow
 }: SidebarAppProps) {
   const [visible, setVisible] = useState(true);
   const [activeTab, setActiveTab] = useState<TabKey>("rules");
@@ -325,10 +340,18 @@ export function SidebarApp({
   );
   const [liveAutoCountdownNow, setLiveAutoCountdownNow] = useState(Date.now());
   const [manualLikeBurstRequestId, setManualLikeBurstRequestId] = useState(0);
+  const [aiTimedBarrageIntentId, setAiTimedBarrageIntentId] = useState<AiTimedBarrageIntentId>("regular");
   const [aiTimedBarrageStyleId, setAiTimedBarrageStyleId] = useState<AiTimedBarrageStyleId>("warm_call");
+  const [aiTimedBarrageTopicTargetId, setAiTimedBarrageTopicTargetId] =
+    useState<AiTimedBarrageTopicTargetId>("host");
+  const [aiTimedBarrageTopicCategoryId, setAiTimedBarrageTopicCategoryId] =
+    useState<AiTimedBarrageTopicCategoryId>("music");
+  const [aiTimedBarrageTopicFreshnessId, setAiTimedBarrageTopicFreshnessId] =
+    useState<AiTimedBarrageTopicFreshnessId>("evergreen");
   const [aiTimedBarrageText, setAiTimedBarrageText] = useState("");
   const [aiTimedBarrageError, setAiTimedBarrageError] = useState<string | undefined>(undefined);
   const [aiTimedBarrageLoading, setAiTimedBarrageLoading] = useState(false);
+  const [aiTimedBarrageSending, setAiTimedBarrageSending] = useState(false);
   const timings = useMemo<SidebarAutomationTimings>(
     () => ({ ...DEFAULT_AUTOMATION_TIMINGS, ...automationTimings }),
     [automationTimings]
@@ -675,14 +698,47 @@ export function SidebarApp({
     [appendLog, clearPendingLiveAutoTimedBarrageQueue]
   );
 
+  const resetLiveAutoTimedBarrageCountdown = useCallback(() => {
+    if (!liveAutoTimedBarrageActiveRef.current && !liveAutoTimedBarrageExpiresAt) return;
+
+    const now = Date.now();
+    const expiresAt = now + timings.liveAutoTimedBarrageDurationMs;
+    window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
+    window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
+    window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
+    setLiveAutoTimedBarrageExpiresAt(expiresAt);
+    setLiveAutoCountdownNow(now);
+    liveAutoTimedBarrageActiveRef.current = true;
+    appendLog("assistant", `已重置开播窗口倒计时，剩余 ${formatDuration(expiresAt - now)}`);
+  }, [appendLog, liveAutoTimedBarrageExpiresAt, timings.liveAutoTimedBarrageDurationMs]);
+
+  const resetLiveAutoLikeCountdown = useCallback(() => {
+    const now = Date.now();
+    const nextReadyAt = now + timings.liveAutoLikeDelayMs;
+    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+    window.sessionStorage.setItem(LIVE_AUTO_LIKE_READY_KEY, String(nextReadyAt));
+    setLiveAutoLikeReadyAt(nextReadyAt);
+    setLiveAutoLikeBurstUntil(undefined);
+    setLiveAutoCountdownNow(now);
+    likeBurstStartedRef.current = false;
+    setManualLikeBurstRequestId(0);
+    clearManualLikeRetryTimer();
+    updateScheduledLikeEnabled(true);
+    void adapter.cancelLike?.();
+    appendLog("assistant", `已重置自动点赞倒计时，下一轮将在 ${formatDuration(nextReadyAt - now)} 后执行`);
+  }, [adapter, appendLog, clearManualLikeRetryTimer, timings.liveAutoLikeDelayMs, updateScheduledLikeEnabled]);
+
   const clearHostedPendingState = useCallback(
     () => {
       window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_HANDLED_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_READY_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
       setLiveAutoTimedBarrageExpiresAt(undefined);
+      setLiveAutoLikeReadyAt(undefined);
       setLiveAutoLikeBurstUntil(undefined);
       setManualLikeBurstRequestId(0);
       clearManualLikeRetryTimer();
@@ -783,8 +839,20 @@ export function SidebarApp({
   useEffect(() => {
     if (!profileReady) return;
     if (!profile.hostedModeEnabled) {
-      if (window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) || window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY)) {
+      const hasHostedCountdownState = Boolean(
+        window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
+      );
+      if (hasHostedCountdownState) {
         clearHostedPendingState();
+        disableLiveAutomationControls("托管未开启", false);
+        stopLiveAutoLikeCountdown("托管未开启，已关闭所有倒计时", {
+          shouldDisableLike: true,
+          shouldClearSchedule: true
+        });
       }
       return;
     }
@@ -833,10 +901,12 @@ export function SidebarApp({
   }, [
     appendLog,
     clearHostedPendingState,
+    disableLiveAutomationControls,
     enableLiveAutomationControls,
     profile.hostedModeEnabled,
     profileReady,
     startLiveAutoLikeCountdown,
+    stopLiveAutoLikeCountdown,
     updateScheduledLikeEnabled
   ]);
 
@@ -1299,6 +1369,13 @@ export function SidebarApp({
     }));
   };
 
+  const updateAiTimedBarrageIntent = (intentId: AiTimedBarrageIntentId) => {
+    const nextStyle = getAiTimedBarrageStyles(intentId)[0];
+    setAiTimedBarrageIntentId(intentId);
+    if (nextStyle) setAiTimedBarrageStyleId(nextStyle.id);
+    setAiTimedBarrageError(undefined);
+  };
+
   const refreshAiTimedBarrage = async () => {
     if (aiTimedBarrageLoading) return;
 
@@ -1313,6 +1390,10 @@ export function SidebarApp({
       const response = await chromeRuntimeSendMessage<GenerateTimedBarrageResponse>({
         type: "DMW_GENERATE_TIMED_BARRAGE",
         styleId: aiTimedBarrageStyleId,
+        intentId: aiTimedBarrageIntentId,
+        topicTargetId: aiTimedBarrageTopicTargetId,
+        topicCategoryId: aiTimedBarrageTopicCategoryId,
+        topicFreshnessId: aiTimedBarrageTopicFreshnessId,
         mode: currentPool.mode,
         examples,
         maxLength: profileRef.current.maxReplyLength
@@ -1350,7 +1431,21 @@ export function SidebarApp({
       return;
     }
 
-    const styleLabel = AI_TIMED_BARRAGE_STYLES.find((style) => style.id === aiTimedBarrageStyleId)?.label ?? "AI";
+    const styleOptions = getAiTimedBarrageStyles(aiTimedBarrageIntentId);
+    const styleLabel = styleOptions.find((style) => style.id === aiTimedBarrageStyleId)?.label ?? "AI";
+    const intentLabel =
+      AI_TIMED_BARRAGE_INTENTS.find((intent) => intent.id === aiTimedBarrageIntentId)?.label ?? "普通互动";
+    const topicCategoryLabel =
+      AI_TIMED_BARRAGE_TOPIC_CATEGORIES.find((category) => category.id === aiTimedBarrageTopicCategoryId)?.label ??
+      "话题";
+    const topicTargetLabel =
+      AI_TIMED_BARRAGE_TOPIC_TARGETS.find((target) => target.id === aiTimedBarrageTopicTargetId)?.label ?? "对象";
+    const aiLabel =
+      aiTimedBarrageIntentId === "chitchat_topic"
+        ? `AI ${intentLabel}-${topicCategoryLabel}`
+        : aiTimedBarrageIntentId === "comfort"
+          ? `AI ${intentLabel}-${topicTargetLabel}-${styleLabel}`
+          : `AI ${styleLabel}`;
     updateProfile((current) => ({
       ...current,
       timedBarragePool: {
@@ -1359,7 +1454,7 @@ export function SidebarApp({
           ...current.timedBarragePool.items,
           {
             id: createId("timed_barrage_ai"),
-            label: `AI ${styleLabel}`,
+            label: aiLabel,
             text,
             enabled: true
           }
@@ -1367,6 +1462,59 @@ export function SidebarApp({
       }
     }));
     appendLog("assistant", "已将 AI 生成弹幕加入定时弹幕池");
+  };
+
+  const sendAiTimedBarrageNow = async () => {
+    if (aiTimedBarrageSending) return;
+
+    const currentProfile = profileRef.current;
+    const text = cleanAiTimedBarrageText(aiTimedBarrageText, currentProfile.maxReplyLength);
+    if (!text) {
+      setAiTimedBarrageError("请先刷新生成一条弹幕");
+      return;
+    }
+
+    if (processingRef.current) {
+      setAiTimedBarrageError("当前正在发送弹幕或点赞，请稍后再试");
+      return;
+    }
+
+    const guard = checkSendGuard({
+      text,
+      maxLength: currentProfile.maxReplyLength,
+      lastSentText: lastSentTextRef.current
+    });
+    if (!guard.ok) {
+      setAiTimedBarrageError(guard.reason ?? "弹幕发送前检查未通过");
+      appendLog("warning", `AI 弹幕立即发送拦截：${guard.reason ?? "发送前检查未通过"}`);
+      return;
+    }
+
+    setAiTimedBarrageSending(true);
+    setAiTimedBarrageError(undefined);
+    processingRef.current = true;
+    try {
+      const result = await adapter.sendBarrage(guard.text, {
+        verifyInputWrite: currentProfile.verifyBarrageInputBeforeSend
+      });
+      if (result.ok) {
+        lastBarrageAtRef.current = Date.now();
+        lastSentTextRef.current = guard.text;
+        appendLog("send", `已立即发送 AI 弹幕：${guard.text}`);
+        return;
+      }
+
+      const errorMessage = result.error ?? "发送失败";
+      setAiTimedBarrageError(`立即发送失败：${errorMessage}`);
+      appendLog("error", `AI 弹幕立即发送失败：${errorMessage}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "未知错误";
+      setAiTimedBarrageError(`立即发送异常：${errorMessage}`);
+      appendLog("error", `AI 弹幕立即发送异常：${errorMessage}`);
+    } finally {
+      processingRef.current = false;
+      setAiTimedBarrageSending(false);
+    }
   };
 
   const deleteTimedBarrage = (id: string) => {
@@ -1431,6 +1579,26 @@ export function SidebarApp({
   const likeAction = profile.scheduledActions.find((action) => action.kind === "like");
   const timedBarragePool = profile.timedBarragePool;
   const timedBarrages = timedBarragePool.items;
+  const aiTimedBarrageStyleOptions = getAiTimedBarrageStyles(aiTimedBarrageIntentId);
+  const aiTimedBarrageUsesWebSearch = shouldUseAiTimedBarrageWebSearch({
+    intentId: aiTimedBarrageIntentId,
+    topicFreshnessId: aiTimedBarrageTopicFreshnessId
+  });
+  const aiTimedBarrageSubtitle = aiTimedBarrageUsesWebSearch
+    ? "DeepSeek Web Search · 搜索近期热点后生成"
+    : aiTimedBarrageIntentId === "comfort"
+      ? "DeepSeek · 生成安慰鼓励弹幕"
+      : aiTimedBarrageIntentId === "chitchat_topic"
+        ? "DeepSeek · 生成杂谈话题弹幕"
+        : "DeepSeek · 生成互动打call弹幕";
+  const aiTimedBarragePlaceholder =
+    aiTimedBarrageIntentId === "comfort"
+      ? "点击刷新生成一条安慰鼓励弹幕"
+      : aiTimedBarrageIntentId === "chitchat_topic"
+        ? "点击刷新生成一条可接话的杂谈弹幕"
+        : "点击刷新生成一条和当前弹幕池风格一致的弹幕";
+  const aiTimedBarrageStyleLabel = aiTimedBarrageIntentId === "comfort" ? "情绪" : "风格";
+  const canResetLiveAutoLikeCountdown = Boolean(liveAutoLikeReadyAt || liveAutoLikeBurstUntil || likeAction?.enabled);
   const likeStatusText = liveAutoLikeWaiting
     ? likeAction?.enabled
       ? `下一轮倒计时 ${formatDuration(liveAutoLikeRemainingMs)}`
@@ -1459,18 +1627,18 @@ export function SidebarApp({
     return (
       <button className="dmw-launcher" style={launcherStyle} type="button" onClick={() => setVisible(true)}>
         <Activity size={16} />
-        房管助手
+        {ASSISTANT_TITLE}
       </button>
     );
   }
 
   return (
-    <aside className="dmw-panel" style={panelStyle} aria-label="抖音直播间房管助手">
+    <aside className="dmw-panel" style={panelStyle} aria-label={ASSISTANT_TITLE}>
       <header className="dmw-header" onPointerDown={(event) => beginPanelInteraction("move", event)}>
         <div className="dmw-title-block">
           <div className="dmw-title-line">
             <GripHorizontal className="dmw-drag-icon" size={16} aria-hidden="true" />
-            <div className="dmw-title">房管助手</div>
+            <div className="dmw-title">{ASSISTANT_TITLE}</div>
           </div>
           <div className="dmw-subtitle">当前直播页 · 本地配置</div>
         </div>
@@ -1734,6 +1902,16 @@ export function SidebarApp({
               <span className={`dmw-support is-${liveMonitorSupportTone}`}>
                 {!profile.hostedModeEnabled ? "托管关" : liveAutoTimedBarrageActive ? "窗口中" : liveMonitorLabel(liveMonitorStatus)}
               </span>
+              <button
+                className="dmw-secondary-button dmw-countdown-reset-button"
+                type="button"
+                title="重置开播窗口倒计时"
+                disabled={!liveAutoTimedBarrageActive}
+                onClick={resetLiveAutoTimedBarrageCountdown}
+              >
+                <RefreshCcw size={14} />
+                重置窗口
+              </button>
             </div>
 
             <div className="dmw-scheduled-row">
@@ -1784,28 +1962,116 @@ export function SidebarApp({
               <div className="dmw-ai-barrage-header">
                 <div className="dmw-scheduled-main">
                   <strong>AI 生成弹幕</strong>
-                  <span>DeepSeek · 按当前本地定时弹幕池生成</span>
+                  <span>{aiTimedBarrageSubtitle}</span>
                 </div>
-                <label className="dmw-compact-field">
-                  <span>风格</span>
+              </div>
+              <div className="dmw-ai-barrage-options">
+                <label>
+                  <span>类型</span>
                   <select
-                    className="dmw-ai-style-select"
+                    className="dmw-ai-select dmw-ai-intent-select"
+                    value={aiTimedBarrageIntentId}
+                    onChange={(event) => updateAiTimedBarrageIntent(event.currentTarget.value as AiTimedBarrageIntentId)}
+                  >
+                    {AI_TIMED_BARRAGE_INTENTS.map((intent) => (
+                      <option key={intent.id} value={intent.id}>
+                        {intent.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="dmw-compact-field">
+                  <span>{aiTimedBarrageStyleLabel}</span>
+                  <select
+                    className="dmw-ai-select dmw-ai-style-select"
                     value={aiTimedBarrageStyleId}
                     onChange={(event) => setAiTimedBarrageStyleId(event.currentTarget.value as AiTimedBarrageStyleId)}
                   >
-                    {AI_TIMED_BARRAGE_STYLES.map((style) => (
+                    {aiTimedBarrageStyleOptions.map((style) => (
                       <option key={style.id} value={style.id}>
                         {style.label}
                       </option>
                     ))}
                   </select>
                 </label>
+                {aiTimedBarrageIntentId === "chitchat_topic" && (
+                  <>
+                    <label>
+                      <span>对象</span>
+                      <select
+                        className="dmw-ai-select dmw-ai-topic-target-select"
+                        value={aiTimedBarrageTopicTargetId}
+                        onChange={(event) =>
+                          setAiTimedBarrageTopicTargetId(event.currentTarget.value as AiTimedBarrageTopicTargetId)
+                        }
+                      >
+                        {AI_TIMED_BARRAGE_TOPIC_TARGETS.map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>话题</span>
+                      <select
+                        className="dmw-ai-select dmw-ai-topic-category-select"
+                        value={aiTimedBarrageTopicCategoryId}
+                        onChange={(event) =>
+                          setAiTimedBarrageTopicCategoryId(event.currentTarget.value as AiTimedBarrageTopicCategoryId)
+                        }
+                      >
+                        {AI_TIMED_BARRAGE_TOPIC_CATEGORIES.map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>热度</span>
+                      <select
+                        className="dmw-ai-select dmw-ai-topic-freshness-select"
+                        value={aiTimedBarrageTopicFreshnessId}
+                        onChange={(event) =>
+                          setAiTimedBarrageTopicFreshnessId(
+                            event.currentTarget.value as AiTimedBarrageTopicFreshnessId
+                          )
+                        }
+                      >
+                        {AI_TIMED_BARRAGE_TOPIC_FRESHNESS.map((freshness) => (
+                          <option key={freshness.id} value={freshness.id}>
+                            {freshness.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                )}
+                {aiTimedBarrageIntentId === "comfort" && (
+                  <label>
+                    <span>对象</span>
+                    <select
+                      className="dmw-ai-select dmw-ai-topic-target-select"
+                      value={aiTimedBarrageTopicTargetId}
+                      onChange={(event) =>
+                        setAiTimedBarrageTopicTargetId(event.currentTarget.value as AiTimedBarrageTopicTargetId)
+                      }
+                    >
+                      {AI_TIMED_BARRAGE_TOPIC_TARGETS.map((target) => (
+                        <option key={target.id} value={target.id}>
+                          {target.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
               <textarea
                 className="dmw-ai-barrage-text"
                 rows={2}
                 value={aiTimedBarrageText}
-                placeholder="点击刷新生成一条和当前弹幕池风格一致的弹幕"
+                placeholder={aiTimedBarragePlaceholder}
                 onChange={(event) => {
                   setAiTimedBarrageText(cleanAiTimedBarrageText(event.currentTarget.value, profile.maxReplyLength));
                   setAiTimedBarrageError(undefined);
@@ -1820,6 +2086,15 @@ export function SidebarApp({
                 >
                   {aiTimedBarrageLoading ? <RefreshCcw className="dmw-spin-icon" size={15} /> : <Sparkles size={15} />}
                   {aiTimedBarrageLoading ? "生成中" : "刷新生成"}
+                </button>
+                <button
+                  className="dmw-secondary-button"
+                  type="button"
+                  disabled={!aiTimedBarrageText.trim() || aiTimedBarrageSending}
+                  onClick={() => void sendAiTimedBarrageNow()}
+                >
+                  {aiTimedBarrageSending ? <RefreshCcw className="dmw-spin-icon" size={15} /> : <Send size={15} />}
+                  {aiTimedBarrageSending ? "发送中" : "立即发送"}
                 </button>
                 <button
                   className="dmw-secondary-button"
@@ -1848,6 +2123,16 @@ export function SidebarApp({
                   <strong>自动点赞</strong>
                   <span>{likeStatusText} · 快捷键 Alt+Shift+L · 关闭不重置倒计时 · 时长 1-400 秒</span>
                 </div>
+                <button
+                  className="dmw-secondary-button dmw-countdown-reset-button"
+                  type="button"
+                  title="重置自动点赞倒计时"
+                  disabled={!canResetLiveAutoLikeCountdown}
+                  onClick={resetLiveAutoLikeCountdown}
+                >
+                  <RefreshCcw size={14} />
+                  重置点赞
+                </button>
                 <input
                   className="dmw-small-number"
                   type="number"

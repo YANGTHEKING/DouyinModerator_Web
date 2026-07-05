@@ -37,6 +37,8 @@ Rule replies can use `{user}`, `{gift}`, `{count}`, `{content}`, `{diamonds}`, a
 4. Load the generated `dist/` directory as an unpacked extension.
 5. Open a `https://live.douyin.com/*` page. The assistant panel appears on the right.
 
+For the packaged release and a picture-based end-user walkthrough, see [docs/使用说明.md](docs/使用说明.md).
+
 ## Notes
 
 The first page adapter intentionally reads visible page activity instead of decoding Douyin WebSocket protobuf messages. Some trigger types are marked as partially supported because Douyin page markup can vary and hidden or folded events may not be visible in the DOM.

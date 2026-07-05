@@ -15,9 +15,9 @@ function hasChromeStorage(): boolean {
 }
 
 export function normalizeRuntimeSettings(value: unknown): RuntimeSettings {
-  const source = (value ?? {}) as Partial<RuntimeSettings>;
+  void value;
   return {
-    developerModeEnabled: Boolean(source.developerModeEnabled)
+    developerModeEnabled: false
   };
 }
 
