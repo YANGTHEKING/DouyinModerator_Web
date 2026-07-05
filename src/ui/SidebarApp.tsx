@@ -119,6 +119,7 @@ const LIVE_AUTO_EXPIRES_KEY = "dmwLiveAutoTimedBarrageExpiresAt";
 const LIVE_AUTO_HANDLED_KEY = "dmwLiveAutoTimedBarrageHandled";
 const LIVE_AUTO_LIKE_PENDING_KEY = "dmwLiveAutoLikePending";
 const LIVE_AUTO_LIKE_READY_KEY = "dmwLiveAutoLikeReadyAt";
+const LIVE_AUTO_LIKE_BURST_UNTIL_KEY = "dmwLiveAutoLikeBurstUntil";
 const LIVE_AUTO_QUEUE_SOURCE_PREFIX = "开播定时弹幕";
 
 function formatTime(timestamp: number): string {
@@ -245,6 +246,12 @@ function readLiveAutoLikeReadyAt(): number | undefined {
   return value && value > 0 ? value : undefined;
 }
 
+function readLiveAutoLikeBurstUntil(): number | undefined {
+  const raw = window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+  const value = raw ? Number(raw) : undefined;
+  return value && value > Date.now() ? value : undefined;
+}
+
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -313,7 +320,11 @@ export function SidebarApp({
     readLiveAutoTimedBarrageExpiresAt
   );
   const [liveAutoLikeReadyAt, setLiveAutoLikeReadyAt] = useState<number | undefined>(readLiveAutoLikeReadyAt);
+  const [liveAutoLikeBurstUntil, setLiveAutoLikeBurstUntil] = useState<number | undefined>(
+    readLiveAutoLikeBurstUntil
+  );
   const [liveAutoCountdownNow, setLiveAutoCountdownNow] = useState(Date.now());
+  const [manualLikeBurstRequestId, setManualLikeBurstRequestId] = useState(0);
   const [aiTimedBarrageStyleId, setAiTimedBarrageStyleId] = useState<AiTimedBarrageStyleId>("warm_call");
   const [aiTimedBarrageText, setAiTimedBarrageText] = useState("");
   const [aiTimedBarrageError, setAiTimedBarrageError] = useState<string | undefined>(undefined);
@@ -333,6 +344,7 @@ export function SidebarApp({
   const lastTimedBarrageItemRef = useRef<string | undefined>(undefined);
   const processingRef = useRef(false);
   const likeBurstStartedRef = useRef(false);
+  const manualLikeRetryTimerRef = useRef<number | undefined>(undefined);
   const panelBoundsRef = useRef(panelBounds);
   const panelInteractionRef = useRef<PanelInteraction | null>(null);
   const bodyCursorRef = useRef("");
@@ -459,19 +471,44 @@ export function SidebarApp({
   );
 
   const updateProfile = useCallback((updater: (current: AssistantProfile) => AssistantProfile) => {
-    setProfile((current) => ({ ...updater(current), updatedAt: Date.now() }));
+    setProfile((current) => {
+      const nextProfile = updater(current);
+      if (nextProfile === current) return current;
+      return { ...nextProfile, updatedAt: Date.now() };
+    });
   }, []);
 
   const updateScheduledLikeEnabled = useCallback(
     (enabled: boolean) => {
-      updateProfile((current) => ({
-        ...current,
-        scheduledActions: current.scheduledActions.map((action) =>
-          action.kind === "like" ? ({ ...action, enabled } as ScheduledAction) : action
-        )
-      }));
+      updateProfile((current) => {
+        let changed = false;
+        const scheduledActions = current.scheduledActions.map((action) => {
+          if (action.kind !== "like") return action;
+          if (action.enabled === enabled) return action;
+          changed = true;
+          return { ...action, enabled } as ScheduledAction;
+        });
+        return changed ? { ...current, scheduledActions } : current;
+      });
     },
     [updateProfile]
+  );
+
+  const clearManualLikeRetryTimer = useCallback(() => {
+    if (manualLikeRetryTimerRef.current === undefined) return;
+    window.clearTimeout(manualLikeRetryTimerRef.current);
+    manualLikeRetryTimerRef.current = undefined;
+  }, []);
+
+  const scheduleManualLikeRetry = useCallback(
+    (delayMs: number) => {
+      if (manualLikeRetryTimerRef.current !== undefined) return;
+      manualLikeRetryTimerRef.current = window.setTimeout(() => {
+        manualLikeRetryTimerRef.current = undefined;
+        setManualLikeBurstRequestId((current) => current + 1);
+      }, delayMs);
+    },
+    []
   );
 
   const startLiveAutoLikeCountdown = useCallback(
@@ -495,9 +532,12 @@ export function SidebarApp({
     (message: string, options?: { shouldDisableLike?: boolean; shouldClearSchedule?: boolean }) => {
       const hadAutoLike = Boolean(
         window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY)
+          window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY) ||
+          window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
       );
       window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+      setLiveAutoLikeBurstUntil(undefined);
       if (options?.shouldClearSchedule) {
         window.sessionStorage.removeItem(LIVE_AUTO_LIKE_READY_KEY);
         setLiveAutoLikeReadyAt(undefined);
@@ -506,11 +546,13 @@ export function SidebarApp({
       }
       setLiveAutoCountdownNow(Date.now());
       likeBurstStartedRef.current = false;
+      setManualLikeBurstRequestId(0);
+      clearManualLikeRetryTimer();
       void adapter.cancelLike?.();
       if (options?.shouldDisableLike) updateScheduledLikeEnabled(false);
       if (hadAutoLike) appendLog("assistant", message);
     },
-    [adapter, appendLog, updateScheduledLikeEnabled]
+    [adapter, appendLog, clearManualLikeRetryTimer, updateScheduledLikeEnabled]
   );
 
   const toggleLiveAutoLike = useCallback(
@@ -523,10 +565,16 @@ export function SidebarApp({
 
       const existingReadyAt = readLiveAutoLikeReadyAt();
       if (existingReadyAt) {
+        const now = Date.now();
         setLiveAutoLikeReadyAt(existingReadyAt);
-        setLiveAutoCountdownNow(Date.now());
+        setLiveAutoCountdownNow(now);
         updateScheduledLikeEnabled(true);
-        appendLog("assistant", `自动点赞已开启，继续当前 62 分钟倒计时：${reason}`);
+        if (existingReadyAt > now) {
+          setManualLikeBurstRequestId((current) => current + 1);
+          appendLog("assistant", `自动点赞已开启，将立即执行一次，并继续当前 62 分钟倒计时：${reason}`);
+        } else {
+          appendLog("assistant", `自动点赞已开启，倒计时已结束，将立即执行：${reason}`);
+        }
         return;
       }
 
@@ -537,6 +585,7 @@ export function SidebarApp({
 
   const enableLiveAutomationControls = useCallback(
     (reason: string, shouldLog = false) => {
+      runningRef.current = true;
       setRunning(true);
       updateProfile((current) => ({
         ...current,
@@ -552,6 +601,7 @@ export function SidebarApp({
 
   const disableLiveAutomationControls = useCallback(
     (reason: string, shouldLog = false) => {
+      runningRef.current = false;
       setRunning(false);
       updateProfile((current) => ({
         ...current,
@@ -631,11 +681,15 @@ export function SidebarApp({
       window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_HANDLED_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
       setLiveAutoTimedBarrageExpiresAt(undefined);
+      setLiveAutoLikeBurstUntil(undefined);
+      setManualLikeBurstRequestId(0);
+      clearManualLikeRetryTimer();
       liveAutoTimedBarrageActiveRef.current = false;
       clearPendingLiveAutoTimedBarrageQueue();
     },
-    [clearPendingLiveAutoTimedBarrageQueue]
+    [clearManualLikeRetryTimer, clearPendingLiveAutoTimedBarrageQueue]
   );
 
   const clearHostedLiveAutomationState = useCallback(
@@ -738,6 +792,9 @@ export function SidebarApp({
     const now = Date.now();
     const pendingTimedBarrage = Number(window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) || "");
     const pendingLike = Number(window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) || "");
+    const activeTimedBarrage = readLiveAutoTimedBarrageExpiresAt();
+    const activeLikeBurstUntil = readLiveAutoLikeBurstUntil();
+    const activeLikeReadyAt = readLiveAutoLikeReadyAt();
 
     if (pendingTimedBarrage) {
       window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
@@ -749,18 +806,38 @@ export function SidebarApp({
         enableLiveAutomationControls("开播刷新完成", true);
         appendLog("assistant", "开播刷新完成，已记录开播窗口");
       }
+    } else if (activeTimedBarrage) {
+      window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
+      setLiveAutoTimedBarrageExpiresAt(activeTimedBarrage);
+      setLiveAutoCountdownNow(now);
+      liveAutoTimedBarrageActiveRef.current = true;
+      enableLiveAutomationControls("刷新后恢复托管状态", false);
     }
 
-    if (!pendingLike) return;
-    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
-    startLiveAutoLikeCountdown(pendingLike, "开播刷新完成");
+    if (activeLikeBurstUntil) {
+      setLiveAutoLikeBurstUntil(activeLikeBurstUntil);
+      updateScheduledLikeEnabled(true);
+      setLiveAutoCountdownNow(now);
+    }
+
+    if (pendingLike) {
+      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      startLiveAutoLikeCountdown(pendingLike, "开播刷新完成");
+      return;
+    }
+
+    if (activeLikeReadyAt) {
+      setLiveAutoLikeReadyAt(activeLikeReadyAt);
+      setLiveAutoCountdownNow(now);
+    }
   }, [
     appendLog,
     clearHostedPendingState,
     enableLiveAutomationControls,
     profile.hostedModeEnabled,
     profileReady,
-    startLiveAutoLikeCountdown
+    startLiveAutoLikeCountdown,
+    updateScheduledLikeEnabled
   ]);
 
   useEffect(() => {
@@ -1008,24 +1085,33 @@ export function SidebarApp({
   }, [adapter, appendLog, enqueueBarrage, liveAutoTimedBarrageActive, profile.scheduledActions, profile.timedBarragePool, running]);
 
   useEffect(() => {
+    if (!profileReady) return;
     const likeEnabled = profile.scheduledActions.some((action) => action.kind === "like" && action.enabled);
-    if (running && likeEnabled) return;
+    if ((running || runningRef.current) && likeEnabled) return;
+    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+    setLiveAutoLikeBurstUntil(undefined);
+    setManualLikeBurstRequestId(0);
+    clearManualLikeRetryTimer();
     void adapter.cancelLike?.();
-  }, [adapter, profile.scheduledActions, running]);
+  }, [adapter, clearManualLikeRetryTimer, profile.scheduledActions, profileReady, running]);
 
   useEffect(() => {
     const likeAction = profile.scheduledActions.find((action) => action.kind === "like" && action.enabled);
+    const manualLikeRequested = manualLikeBurstRequestId > 0;
+    const resumableBurstUntil = liveAutoLikeBurstUntil && liveAutoLikeBurstUntil > Date.now() ? liveAutoLikeBurstUntil : undefined;
+
+    if (!profileReady) return;
     if (!running || !likeAction) {
       likeBurstStartedRef.current = false;
       return;
     }
 
-    if (liveAutoLikeWaiting) {
+    if (liveAutoLikeWaiting && !manualLikeRequested && !resumableBurstUntil) {
       likeBurstStartedRef.current = false;
       return;
     }
 
-    if (!liveAutoLikeReadyAt) return;
+    if (!liveAutoLikeReadyAt && !manualLikeRequested && !resumableBurstUntil) return;
 
     if (likeBurstStartedRef.current) return;
 
@@ -1033,7 +1119,13 @@ export function SidebarApp({
     likeBurstStartedRef.current = true;
 
     const runLikeBurst = async () => {
-      const durationSeconds = clampNumber(likeAction.intervalSeconds, 1, 400);
+      const now = Date.now();
+      const burstKind = resumableBurstUntil ? "resume" : manualLikeRequested ? "manual" : "scheduled";
+      const resumeBurstUntil = resumableBurstUntil ?? 0;
+      const durationSeconds =
+        burstKind === "resume"
+          ? clampNumber(Math.ceil((resumeBurstUntil - now) / 1000), 1, 400)
+          : clampNumber(likeAction.intervalSeconds, 1, 400);
       const isLikeEnabled = () =>
         runningRef.current &&
         profileRef.current.scheduledActions.some((action) => action.kind === "like" && action.enabled);
@@ -1053,14 +1145,24 @@ export function SidebarApp({
 
       if (cancelled || !isLikeEnabled()) return;
       if (hasBarrageWork()) {
-        scheduleNextRun(timings.likeBurstIdleWaitMs);
+        if (burstKind === "scheduled") scheduleNextRun(timings.likeBurstIdleWaitMs);
+        else if (burstKind === "manual") scheduleManualLikeRetry(timings.likeBurstIdleWaitMs);
         likeBurstStartedRef.current = false;
         appendLog("warning", "自动点赞暂缓：弹幕队列正忙，稍后重试");
         return;
       }
 
-      const nextReadyAt = scheduleNextRun(timings.liveAutoLikeDelayMs);
-      appendLog("assistant", `自动点赞已开始，下一轮将在 ${formatDuration(nextReadyAt - Date.now())} 后执行`);
+      const burstUntil = burstKind === "resume" ? resumeBurstUntil : Date.now() + durationSeconds * 1000;
+      window.sessionStorage.setItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY, String(burstUntil));
+      setLiveAutoLikeBurstUntil(burstUntil);
+      if (burstKind === "scheduled") {
+        const nextReadyAt = scheduleNextRun(timings.liveAutoLikeDelayMs);
+        appendLog("assistant", `自动点赞已开始，下一轮将在 ${formatDuration(nextReadyAt - Date.now())} 后执行`);
+      } else if (burstKind === "manual") {
+        appendLog("assistant", "手动开启自动点赞，已立即执行一次，下一轮倒计时保持不变");
+      } else {
+        appendLog("assistant", `刷新后继续自动点赞，剩余约 ${formatDuration(burstUntil - Date.now())}`);
+      }
       processingRef.current = true;
       try {
         const result = await adapter.sendLike({ durationSeconds });
@@ -1070,6 +1172,14 @@ export function SidebarApp({
       } catch (error) {
         appendLog("error", `自动点赞异常：${error instanceof Error ? error.message : "未知错误"}`);
       } finally {
+        const currentBurstUntil = Number(window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY) || "");
+        if (!currentBurstUntil || currentBurstUntil === burstUntil || currentBurstUntil <= Date.now()) {
+          window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+          setLiveAutoLikeBurstUntil(undefined);
+        } else {
+          setLiveAutoLikeBurstUntil(currentBurstUntil);
+        }
+        if (burstKind === "manual") setManualLikeBurstRequestId(0);
         likeBurstStartedRef.current = false;
         processingRef.current = false;
       }
@@ -1082,14 +1192,22 @@ export function SidebarApp({
   }, [
     adapter,
     appendLog,
+    liveAutoLikeBurstUntil,
     liveAutoLikeReadyAt,
     liveAutoLikeWaiting,
+    manualLikeBurstRequestId,
     profile.scheduledActions,
+    profileReady,
     running,
     timings.likeBurstIdlePollMs,
     timings.likeBurstIdleWaitMs,
-    timings.liveAutoLikeDelayMs
+    timings.liveAutoLikeDelayMs,
+    scheduleManualLikeRetry
   ]);
+
+  useEffect(() => {
+    return () => clearManualLikeRetryTimer();
+  }, [clearManualLikeRetryTimer]);
 
   const enabledRuleCount = useMemo(() => profile.rules.filter((rule) => rule.enabled).length, [profile.rules]);
   const pendingQueueCount = useMemo(() => queue.filter((item) => item.status === "pending").length, [queue]);

@@ -62,10 +62,11 @@ function createGiftEvent(): LiveEvent {
   };
 }
 
-function createMockAdapter() {
+function createMockAdapter(options?: { holdLikes?: boolean }) {
   let emitEvent: ((event: LiveEvent) => void) | undefined;
   const sentBarrages: string[] = [];
   const likeStarts: number[] = [];
+  const likeResolvers: Array<(result: PageSendResult) => void> = [];
 
   const adapter: PageAdapter = {
     observeInteractionFeed(onEvent) {
@@ -80,6 +81,9 @@ function createMockAdapter() {
     },
     async sendLike() {
       likeStarts.push(Date.now());
+      if (options?.holdLikes) {
+        return new Promise<PageSendResult>((resolve) => likeResolvers.push(resolve));
+      }
       return { ok: true };
     },
     async cancelLike(): Promise<PageSendResult> {
@@ -94,6 +98,9 @@ function createMockAdapter() {
     adapter,
     sentBarrages,
     likeStarts,
+    resolveLikes(result: PageSendResult = { ok: true }) {
+      while (likeResolvers.length) likeResolvers.shift()?.(result);
+    },
     emitGift() {
       if (!emitEvent) throw new Error("interaction observer is not mounted");
       emitEvent(createGiftEvent());
@@ -273,24 +280,26 @@ describe("live room automation scenario", () => {
     expect(visibleText()).toMatch(/已临时关闭，下一轮倒计时/);
 
     await advance(60);
+    const readyAtBeforeManualRestart = sessionStorage.getItem("dmwLiveAutoLikeReadyAt");
     toggleLikeShortcut();
     await settle();
-    expect(mock.likeStarts).toHaveLength(1);
+    expect(mock.likeStarts).toHaveLength(2);
+    expect(sessionStorage.getItem("dmwLiveAutoLikeReadyAt")).toBe(readyAtBeforeManualRestart);
 
     await advance(80);
-    expect(mock.likeStarts).toHaveLength(2);
+    expect(mock.likeStarts).toHaveLength(3);
 
     clickButtonByText(/暂停/);
     await settle();
     expect(visibleText()).toContain("已暂停");
 
     await advance(150);
-    expect(mock.likeStarts).toHaveLength(2);
+    expect(mock.likeStarts).toHaveLength(3);
     expect(visibleText()).toMatch(/倒计时结束，等待总开关运行/);
 
     clickButtonByText(/开始/);
     await settle(8);
-    expect(mock.likeStarts).toHaveLength(3);
+    expect(mock.likeStarts).toHaveLength(4);
 
     act(() => mock.emitGift());
     await advance(500);
@@ -300,5 +309,55 @@ describe("live room automation scenario", () => {
     await advance(500);
     await advance(500);
     expect(mock.sentBarrages).toContain("测试打call弹幕[打call]");
+  });
+
+  it("resumes an active hosted like burst after a page refresh", async () => {
+    const now = Date.now();
+    const profile = createRoomManagerProfile();
+    const hostedProfile: AssistantProfile = {
+      ...profile,
+      hostedModeEnabled: true,
+      timedBarragePool: {
+        ...profile.timedBarragePool,
+        enabled: true
+      },
+      scheduledActions: profile.scheduledActions.map((action) =>
+        action.kind === "like" ? { ...action, enabled: true, intervalSeconds: 1 } : action
+      )
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(hostedProfile));
+    sessionStorage.setItem("dmwLiveAutoTimedBarrageHandled", "1");
+    sessionStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
+    sessionStorage.setItem("dmwLiveAutoLikeReadyAt", String(now));
+
+    const checkLiveStatus = vi.fn(async (): Promise<LiveStatusSnapshot> => ({ status: "live", source: "dom", detail: "test-live" }));
+    const requestReload = vi.fn();
+    const mock = createMockAdapter({ holdLikes: true });
+
+    const firstPage = await mountSidebarApp({
+      adapter: mock.adapter,
+      liveStatusChecker: checkLiveStatus,
+      requestReload
+    });
+    await settle(16);
+
+    expect(mock.likeStarts).toHaveLength(1);
+    expect(Number(sessionStorage.getItem("dmwLiveAutoLikeBurstUntil"))).toBeGreaterThan(Date.now());
+
+    firstPage.unmount();
+    await advance(20);
+
+    const secondPage = await mountSidebarApp({
+      adapter: mock.adapter,
+      liveStatusChecker: checkLiveStatus,
+      requestReload
+    });
+    await settle(16);
+
+    expect(mock.likeStarts).toHaveLength(2);
+
+    mock.resolveLikes();
+    await settle(8);
+    secondPage.unmount();
   });
 });
