@@ -33,6 +33,11 @@ const sendButtonPollDelaysMs = [0, 50, 120, 250, 500];
 const nearbySendButtonMaxDistancePx = 220;
 const nearbySendButtonMaxVerticalOffsetPx = 80;
 const nearbySendButtonMaxSizePx = 96;
+const defaultLikeBurstDurationSeconds = 5;
+const minLikeBurstDurationSeconds = 1;
+const maxLikeBurstDurationSeconds = 400;
+const likeBurstClickGapMs = 35;
+const likeBurstPairGapMs = 80;
 const giftPanelLearningIntervalMs = 5000;
 const maxGiftPanelLearningLines = 6;
 const maxGiftPanelImageKeys = 3;
@@ -49,6 +54,12 @@ const giftAccentSaturationThreshold = 0.2;
 
 type ClickableElement = HTMLElement | SVGElement;
 
+interface ScriptLikeBurst {
+  cancelled: boolean;
+}
+
+let activeScriptLikeBurst: ScriptLikeBurst | undefined;
+
 interface ViewportPoint {
   x: number;
   y: number;
@@ -57,6 +68,7 @@ interface ViewportPoint {
 interface TrustedClickResponse {
   ok: boolean;
   error?: string;
+  cancelled?: boolean;
 }
 
 interface RgbaColor {
@@ -1716,6 +1728,26 @@ async function dispatchTrustedClick(point: ViewportPoint): Promise<TrustedClickR
   return response ?? { ok: false, error: "可信点击通道不可用" };
 }
 
+async function dispatchTrustedClickBurst(point: ViewportPoint, durationSeconds: number): Promise<TrustedClickResponse> {
+  const response = await chromeRuntimeSendMessage<TrustedClickResponse>({
+    type: "DMW_TRUSTED_CLICK_BURST",
+    point,
+    durationMs: durationSeconds * 1000,
+    clickGapMs: likeBurstClickGapMs,
+    pairGapMs: likeBurstPairGapMs
+  });
+
+  return response ?? { ok: false, error: "可信连点通道不可用" };
+}
+
+async function cancelTrustedClickBurst(): Promise<TrustedClickResponse> {
+  const response = await chromeRuntimeSendMessage<TrustedClickResponse>({
+    type: "DMW_CANCEL_TRUSTED_CLICK_BURST"
+  });
+
+  return response ?? { ok: true };
+}
+
 async function dispatchTrustedEnter(): Promise<TrustedClickResponse> {
   const response = await chromeRuntimeSendMessage<TrustedClickResponse>({
     type: "DMW_TRUSTED_ENTER"
@@ -1805,6 +1837,36 @@ function dispatchDoubleClick(element: Element): void {
   element.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, clientX, clientY }));
 }
 
+function clampLikeBurstDurationSeconds(value: number | undefined): number {
+  if (!Number.isFinite(value)) return defaultLikeBurstDurationSeconds;
+  return Math.min(maxLikeBurstDurationSeconds, Math.max(minLikeBurstDurationSeconds, Math.round(value ?? 0)));
+}
+
+async function dispatchScriptDoubleClickBurst(element: Element, durationSeconds: number): Promise<PageSendResult> {
+  if (activeScriptLikeBurst) activeScriptLikeBurst.cancelled = true;
+  const burst: ScriptLikeBurst = { cancelled: false };
+  activeScriptLikeBurst = burst;
+  const deadline = Date.now() + durationSeconds * 1000;
+  try {
+    do {
+      if (burst.cancelled) return { ok: false, cancelled: true, error: "自动点赞已取消" };
+      dispatchDoubleClick(element);
+      await sleep(likeBurstClickGapMs);
+      if (burst.cancelled) return { ok: false, cancelled: true, error: "自动点赞已取消" };
+      dispatchDoubleClick(element);
+      await sleep(likeBurstPairGapMs);
+    } while (!burst.cancelled && Date.now() <= deadline);
+
+    return burst.cancelled ? { ok: false, cancelled: true, error: "自动点赞已取消" } : { ok: true };
+  } finally {
+    if (activeScriptLikeBurst === burst) activeScriptLikeBurst = undefined;
+  }
+}
+
+function cancelScriptDoubleClickBurst(): void {
+  if (activeScriptLikeBurst) activeScriptLikeBurst.cancelled = true;
+}
+
 export function createDouyinPageAdapter(): PageAdapter {
   return {
     observeInteractionFeed(onEvent) {
@@ -1891,22 +1953,37 @@ export function createDouyinPageAdapter(): PageAdapter {
       return { ok: true };
     },
 
-    async sendLike(): Promise<PageSendResult> {
+    async sendLike(options): Promise<PageSendResult> {
+      const durationSeconds = clampLikeBurstDurationSeconds(options?.durationSeconds);
       const likeButton = findLikeButton();
       if (likeButton) {
-        likeButton.click();
-        return { ok: true };
+        const point = viewportPointFromElement(likeButton);
+        if (point) {
+          const trustedBurst = await dispatchTrustedClickBurst(point, durationSeconds);
+          if (trustedBurst.ok) return trustedBurst;
+          if (trustedBurst.cancelled) return trustedBurst;
+        }
+        return dispatchScriptDoubleClickBurst(likeButton, durationSeconds);
       }
 
       const video = document.querySelector("video");
       if (video) {
-        dispatchDoubleClick(video);
-        await sleep(80);
-        dispatchDoubleClick(video);
-        return { ok: true };
+        const point = viewportPointFromElement(video);
+        if (point) {
+          const trustedBurst = await dispatchTrustedClickBurst(point, durationSeconds);
+          if (trustedBurst.ok) return trustedBurst;
+          if (trustedBurst.cancelled) return trustedBurst;
+        }
+        return dispatchScriptDoubleClickBurst(video, durationSeconds);
       }
 
       return { ok: false, error: "未找到点赞控件或视频区域" };
+    },
+
+    async cancelLike(): Promise<PageSendResult> {
+      cancelScriptDoubleClickBurst();
+      await cancelTrustedClickBurst();
+      return { ok: true, cancelled: true };
     },
 
     getTriggerSupport(trigger) {

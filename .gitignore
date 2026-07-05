@@ -1,5 +1,8 @@
 node_modules/
 dist/
+*.crx
+*.pem
 .codegraph/
 .DS_Store
 npm-debug.log*
+vite.*.log

@@ -85,7 +85,7 @@ export function createDefaultScheduledActions(): ScheduledAction[] {
       id: createId("scheduled"),
       kind: "like",
       label: "自动点赞",
-      intervalSeconds: 30,
+      intervalSeconds: 400,
       enabled: false
     }
   ];
@@ -94,7 +94,7 @@ export function createDefaultScheduledActions(): ScheduledAction[] {
 export function createDefaultTimedBarragePool(): TimedBarragePool {
   return {
     enabled: false,
-    intervalSeconds: 120,
+    intervalSeconds: 80,
     mode: "random",
     items: DEFAULT_TIMED_BARRAGE_ITEMS
   };
@@ -103,6 +103,7 @@ export function createDefaultTimedBarragePool(): TimedBarragePool {
 export function createDefaultProfile(): AssistantProfile {
   return {
     schemaVersion: 1,
+    hostedModeEnabled: false,
     rules: createDefaultRules(),
     timedBarragePool: createDefaultTimedBarragePool(),
     scheduledActions: createDefaultScheduledActions(),

@@ -56,7 +56,7 @@ function normalizeScheduledActions(value: unknown, fallback: ScheduledAction[]):
     };
 
     if (source.kind === "like") {
-      return [{ ...base, kind: "like", intervalSeconds: clampNumber(source.intervalSeconds, 30, 30, 86400) }];
+      return [{ ...base, kind: "like", intervalSeconds: clampNumber(source.intervalSeconds, 400, 1, 400) }];
     }
 
     return [];
@@ -140,6 +140,8 @@ export function normalizeProfile(value: unknown): AssistantProfile {
 
   return {
     schemaVersion: 1,
+    hostedModeEnabled:
+      typeof source.hostedModeEnabled === "boolean" ? source.hostedModeEnabled : fallback.hostedModeEnabled,
     rules: normalizeRules(source.rules, fallback.rules),
     timedBarragePool: normalizeTimedBarragePool(
       source.timedBarragePool,

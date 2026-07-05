@@ -101,6 +101,7 @@ export interface ScheduledLikeAction {
 
 export interface AssistantProfile {
   schemaVersion: 1;
+  hostedModeEnabled: boolean;
   rules: AutomationRule[];
   timedBarragePool: TimedBarragePool;
   scheduledActions: ScheduledAction[];
@@ -138,15 +139,21 @@ export interface SessionLogEntry {
 export interface PageSendResult {
   ok: boolean;
   error?: string;
+  cancelled?: boolean;
 }
 
 export interface PageSendOptions {
   verifyInputWrite?: boolean;
 }
 
+export interface PageLikeOptions {
+  durationSeconds?: number;
+}
+
 export interface PageAdapter {
   observeInteractionFeed: (onEvent: (event: LiveEvent) => void) => () => void;
   sendBarrage: (text: string, options?: PageSendOptions) => Promise<PageSendResult>;
-  sendLike: () => Promise<PageSendResult>;
+  sendLike: (options?: PageLikeOptions) => Promise<PageSendResult>;
+  cancelLike?: () => Promise<PageSendResult>;
   getTriggerSupport: (trigger: TriggerType) => TriggerSupport;
 }

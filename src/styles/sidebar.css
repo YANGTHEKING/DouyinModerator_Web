@@ -143,6 +143,7 @@ button {
 .dmw-icon-button,
 .dmw-secondary-button,
 .dmw-run-button,
+.dmw-hosted-button,
 .dmw-quiet-button {
   display: inline-flex;
   align-items: center;
@@ -194,6 +195,21 @@ button {
 
 .dmw-run-button.is-running {
   background: #1f2328;
+}
+
+.dmw-hosted-button {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(31, 35, 40, 0.12);
+  background: #f2f3f5;
+  color: #3b4148;
+  white-space: nowrap;
+}
+
+.dmw-hosted-button.is-active {
+  border-color: rgba(21, 115, 71, 0.28);
+  background: #e7f6ed;
+  color: #157347;
 }
 
 .dmw-metrics {
@@ -525,6 +541,60 @@ textarea:focus {
 .dmw-compact-field {
   width: auto;
   flex: 0 0 auto;
+}
+
+.dmw-ai-barrage-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(31, 35, 40, 0.1);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dmw-ai-barrage-header,
+.dmw-ai-barrage-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.dmw-ai-style-select {
+  width: 108px;
+  flex: 0 0 auto;
+}
+
+.dmw-ai-barrage-text {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.dmw-ai-barrage-actions {
+  flex-wrap: wrap;
+}
+
+.dmw-ai-barrage-error {
+  min-width: 0;
+  flex: 1;
+  color: #bd123c;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.dmw-spin-icon {
+  animation: dmw-spin 900ms linear infinite;
+}
+
+@keyframes dmw-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .dmw-queue-list,

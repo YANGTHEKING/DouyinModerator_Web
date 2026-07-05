@@ -8,7 +8,12 @@
     "default_popup": "popup.html"
   },
   "permissions": ["storage", "debugger"],
-  "host_permissions": ["https://live.douyin.com/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "host_permissions": [
+    "https://live.douyin.com/*",
+    "https://api.deepseek.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
   "background": {
     "service_worker": "assets/background.js",
     "type": "module"
