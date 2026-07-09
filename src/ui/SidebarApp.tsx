@@ -132,6 +132,64 @@ const LIVE_AUTO_LIKE_PENDING_KEY = "dmwLiveAutoLikePending";
 const LIVE_AUTO_LIKE_READY_KEY = "dmwLiveAutoLikeReadyAt";
 const LIVE_AUTO_LIKE_BURST_UNTIL_KEY = "dmwLiveAutoLikeBurstUntil";
 const LIVE_AUTO_QUEUE_SOURCE_PREFIX = "开播定时弹幕";
+const AUTO_LIKE_SHORTCUT_TEXT = "Ctrl/Command+Shift+L";
+
+function safeStorageGet(storage: Storage, key: string): string | null {
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(storage: Storage, key: string, value: string): void {
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Ignore unavailable storage and keep the in-memory state moving.
+  }
+}
+
+function safeStorageRemove(storage: Storage, key: string): void {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+function readLiveAutoStorageItem(key: string): string | null {
+  return safeStorageGet(window.localStorage, key) ?? safeStorageGet(window.sessionStorage, key);
+}
+
+function writeLiveAutoStorageItem(key: string, value: string): void {
+  safeStorageSet(window.localStorage, key, value);
+  safeStorageSet(window.sessionStorage, key, value);
+}
+
+function removeLiveAutoStorageItem(key: string): void {
+  safeStorageRemove(window.localStorage, key);
+  safeStorageRemove(window.sessionStorage, key);
+}
+
+function hasLiveAutoStorageItem(key: string): boolean {
+  return readLiveAutoStorageItem(key) !== null;
+}
+
+function isAutoLikeShortcut(event: KeyboardEvent): boolean {
+  if (!event.shiftKey || event.code !== "KeyL") return false;
+
+  const primaryShortcut =
+    !event.altKey && ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+  const legacyShortcut = event.altKey && !event.ctrlKey && !event.metaKey;
+  return primaryShortcut || legacyShortcut;
+}
+
+function autoLikeShortcutLabel(event: KeyboardEvent): string {
+  if (event.metaKey) return "Command+Shift+L";
+  if (event.ctrlKey) return "Ctrl+Shift+L";
+  return "Alt+Shift+L";
+}
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -250,19 +308,19 @@ function pickSequentialTimedBarrage(items: TimedBarrageItem[], previousItemId: s
 }
 
 function readLiveAutoTimedBarrageExpiresAt(): number | undefined {
-  const raw = window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY);
+  const raw = readLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY);
   const value = raw ? Number(raw) : undefined;
   return value && value > Date.now() ? value : undefined;
 }
 
 function readLiveAutoLikeReadyAt(): number | undefined {
-  const raw = window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY);
+  const raw = readLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY);
   const value = raw ? Number(raw) : undefined;
   return value && value > 0 ? value : undefined;
 }
 
 function readLiveAutoLikeBurstUntil(): number | undefined {
-  const raw = window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+  const raw = readLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
   const value = raw ? Number(raw) : undefined;
   return value && value > Date.now() ? value : undefined;
 }
@@ -367,6 +425,7 @@ export function SidebarApp({
   const lastTimedBarrageItemRef = useRef<string | undefined>(undefined);
   const processingRef = useRef(false);
   const likeBurstStartedRef = useRef(false);
+  const likePausedForBarrageRef = useRef(false);
   const manualLikeRetryTimerRef = useRef<number | undefined>(undefined);
   const panelBoundsRef = useRef(panelBounds);
   const panelInteractionRef = useRef<PanelInteraction | null>(null);
@@ -536,7 +595,7 @@ export function SidebarApp({
 
   const startLiveAutoLikeCountdown = useCallback(
     (readyAt: number, reason: string, shouldLog = true) => {
-      window.sessionStorage.setItem(LIVE_AUTO_LIKE_READY_KEY, String(readyAt));
+      writeLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY, String(readyAt));
       setLiveAutoLikeReadyAt(readyAt);
       setLiveAutoCountdownNow(Date.now());
       likeBurstStartedRef.current = false;
@@ -554,15 +613,15 @@ export function SidebarApp({
   const stopLiveAutoLikeCountdown = useCallback(
     (message: string, options?: { shouldDisableLike?: boolean; shouldClearSchedule?: boolean }) => {
       const hadAutoLike = Boolean(
-        window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
+        hasLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
       );
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
       setLiveAutoLikeBurstUntil(undefined);
       if (options?.shouldClearSchedule) {
-        window.sessionStorage.removeItem(LIVE_AUTO_LIKE_READY_KEY);
+        removeLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY);
         setLiveAutoLikeReadyAt(undefined);
       } else {
         setLiveAutoLikeReadyAt(readLiveAutoLikeReadyAt());
@@ -644,13 +703,13 @@ export function SidebarApp({
       const expiresAt = now + timings.liveAutoTimedBarrageDurationMs;
       const likeReadyAt = now;
       window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
-      window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
+      writeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
       setLiveAutoTimedBarrageExpiresAt(expiresAt);
       setLiveAutoCountdownNow(now);
 
       if (shouldRefresh) {
-        window.sessionStorage.setItem(LIVE_AUTO_PENDING_KEY, String(expiresAt));
-        window.sessionStorage.setItem(LIVE_AUTO_LIKE_PENDING_KEY, String(likeReadyAt));
+        writeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY, String(expiresAt));
+        writeLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY, String(likeReadyAt));
         requestReload();
         return;
       }
@@ -661,14 +720,6 @@ export function SidebarApp({
     },
     [appendLog, enableLiveAutomationControls, requestReload, startLiveAutoLikeCountdown, timings.liveAutoTimedBarrageDurationMs]
   );
-
-  const renewLiveAutoTimedBarrage = useCallback(() => {
-    const expiresAt = Date.now() + timings.liveAutoTimedBarrageDurationMs;
-    window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
-    window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
-    setLiveAutoTimedBarrageExpiresAt(expiresAt);
-    liveAutoTimedBarrageActiveRef.current = true;
-  }, [timings.liveAutoTimedBarrageDurationMs]);
 
   const clearPendingLiveAutoTimedBarrageQueue = useCallback(() => {
     setQueue((current) =>
@@ -684,11 +735,11 @@ export function SidebarApp({
     (message: string) => {
       const hadAutoWindow = Boolean(
         liveAutoTimedBarrageActiveRef.current ||
-          window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY)
+          hasLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY)
       );
-      window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY);
       setLiveAutoTimedBarrageExpiresAt(undefined);
       setLiveAutoCountdownNow(Date.now());
       liveAutoTimedBarrageActiveRef.current = false;
@@ -703,9 +754,9 @@ export function SidebarApp({
 
     const now = Date.now();
     const expiresAt = now + timings.liveAutoTimedBarrageDurationMs;
-    window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
+    removeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY);
     window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
-    window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
+    writeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY, String(expiresAt));
     setLiveAutoTimedBarrageExpiresAt(expiresAt);
     setLiveAutoCountdownNow(now);
     liveAutoTimedBarrageActiveRef.current = true;
@@ -715,9 +766,9 @@ export function SidebarApp({
   const resetLiveAutoLikeCountdown = useCallback(() => {
     const now = Date.now();
     const nextReadyAt = now + timings.liveAutoLikeDelayMs;
-    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
-    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
-    window.sessionStorage.setItem(LIVE_AUTO_LIKE_READY_KEY, String(nextReadyAt));
+    removeLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY);
+    removeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+    writeLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY, String(nextReadyAt));
     setLiveAutoLikeReadyAt(nextReadyAt);
     setLiveAutoLikeBurstUntil(undefined);
     setLiveAutoCountdownNow(now);
@@ -731,12 +782,12 @@ export function SidebarApp({
 
   const clearHostedPendingState = useCallback(
     () => {
-      window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY);
       window.sessionStorage.removeItem(LIVE_AUTO_HANDLED_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_READY_KEY);
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
       setLiveAutoTimedBarrageExpiresAt(undefined);
       setLiveAutoLikeReadyAt(undefined);
       setLiveAutoLikeBurstUntil(undefined);
@@ -810,11 +861,11 @@ export function SidebarApp({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat || isEditableShortcutTarget(event.target)) return;
-      if (!(event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === "KeyL")) return;
+      if (!isAutoLikeShortcut(event)) return;
 
       event.preventDefault();
       event.stopPropagation();
-      toggleLiveAutoLike("快捷键 Alt+Shift+L");
+      toggleLiveAutoLike(`快捷键 ${autoLikeShortcutLabel(event)}`);
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
@@ -840,11 +891,11 @@ export function SidebarApp({
     if (!profileReady) return;
     if (!profile.hostedModeEnabled) {
       const hasHostedCountdownState = Boolean(
-        window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_EXPIRES_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_READY_KEY) ||
-          window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
+        hasLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY) ||
+          hasLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY)
       );
       if (hasHostedCountdownState) {
         clearHostedPendingState();
@@ -858,17 +909,17 @@ export function SidebarApp({
     }
 
     const now = Date.now();
-    const pendingTimedBarrage = Number(window.sessionStorage.getItem(LIVE_AUTO_PENDING_KEY) || "");
-    const pendingLike = Number(window.sessionStorage.getItem(LIVE_AUTO_LIKE_PENDING_KEY) || "");
+    const pendingTimedBarrage = Number(readLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY) || "");
+    const pendingLike = Number(readLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY) || "");
     const activeTimedBarrage = readLiveAutoTimedBarrageExpiresAt();
     const activeLikeBurstUntil = readLiveAutoLikeBurstUntil();
     const activeLikeReadyAt = readLiveAutoLikeReadyAt();
 
     if (pendingTimedBarrage) {
-      window.sessionStorage.removeItem(LIVE_AUTO_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY);
       if (pendingTimedBarrage > now) {
         window.sessionStorage.setItem(LIVE_AUTO_HANDLED_KEY, "1");
-        window.sessionStorage.setItem(LIVE_AUTO_EXPIRES_KEY, String(pendingTimedBarrage));
+        writeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY, String(pendingTimedBarrage));
         setLiveAutoTimedBarrageExpiresAt(pendingTimedBarrage);
         setLiveAutoCountdownNow(now);
         enableLiveAutomationControls("开播刷新完成", true);
@@ -889,7 +940,7 @@ export function SidebarApp({
     }
 
     if (pendingLike) {
-      window.sessionStorage.removeItem(LIVE_AUTO_LIKE_PENDING_KEY);
+      removeLiveAutoStorageItem(LIVE_AUTO_LIKE_PENDING_KEY);
       startLiveAutoLikeCountdown(pendingLike, "开播刷新完成");
       return;
     }
@@ -914,7 +965,8 @@ export function SidebarApp({
     liveAutoTimedBarrageActiveRef.current = liveAutoTimedBarrageActive;
     if (liveAutoTimedBarrageActive || liveAutoTimedBarrageExpiresAt === undefined) return;
 
-    window.sessionStorage.removeItem(LIVE_AUTO_EXPIRES_KEY);
+    removeLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY);
+    removeLiveAutoStorageItem(LIVE_AUTO_EXPIRES_KEY);
     setLiveAutoTimedBarrageExpiresAt(undefined);
     updateProfile((current) => ({
       ...current,
@@ -971,18 +1023,19 @@ export function SidebarApp({
       if (snapshot.status !== "live") return;
 
       const hasHandledCurrentLive = window.sessionStorage.getItem(LIVE_AUTO_HANDLED_KEY) === "1";
+      const hasActiveTimedBarrage =
+        liveAutoTimedBarrageActiveRef.current ||
+        Boolean(readLiveAutoTimedBarrageExpiresAt()) ||
+        Number(readLiveAutoStorageItem(LIVE_AUTO_PENDING_KEY) || "") > Date.now();
       const reason = snapshot.detail ?? snapshot.source;
       if (previousStatus === "offline") {
         startLiveAutoTimedBarrage(reason, true);
         return;
       }
 
-      if (!hasHandledCurrentLive && !liveAutoTimedBarrageActiveRef.current) {
+      if (!hasHandledCurrentLive && !hasActiveTimedBarrage) {
         startLiveAutoTimedBarrage(reason, true);
-        return;
       }
-
-      renewLiveAutoTimedBarrage();
     };
 
     void runCheck();
@@ -996,7 +1049,6 @@ export function SidebarApp({
     disableLiveAutomationControls,
     liveStatusChecker,
     profileReady,
-    renewLiveAutoTimedBarrage,
     startLiveAutoTimedBarrage,
     stopLiveAutoLikeCountdown,
     stopLiveAutoTimedBarrage,
@@ -1077,6 +1129,15 @@ export function SidebarApp({
       if (!next) return;
 
       processingRef.current = true;
+      if (readLiveAutoLikeBurstUntil()) {
+        likePausedForBarrageRef.current = true;
+        appendLog("assistant", "检测到待发弹幕，已暂停自动点赞并优先发送弹幕");
+        await Promise.resolve(adapter.cancelLike?.()).catch(() => undefined);
+        const cancelDeadline = Date.now() + 1000;
+        while (likeBurstStartedRef.current && Date.now() < cancelDeadline) {
+          await wait(20);
+        }
+      }
       setQueue((current) => current.map((item) => (item.id === next.id ? { ...item, status: "sending" } : item)));
 
       const guard = checkSendGuard({
@@ -1158,7 +1219,7 @@ export function SidebarApp({
     if (!profileReady) return;
     const likeEnabled = profile.scheduledActions.some((action) => action.kind === "like" && action.enabled);
     if ((running || runningRef.current) && likeEnabled) return;
-    window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+    removeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
     setLiveAutoLikeBurstUntil(undefined);
     setManualLikeBurstRequestId(0);
     clearManualLikeRetryTimer();
@@ -1203,7 +1264,7 @@ export function SidebarApp({
         processingRef.current || queueRef.current.some((item) => item.status === "pending" || item.status === "sending");
       const scheduleNextRun = (delayMs: number) => {
         const nextReadyAt = Date.now() + delayMs;
-        window.sessionStorage.setItem(LIVE_AUTO_LIKE_READY_KEY, String(nextReadyAt));
+        writeLiveAutoStorageItem(LIVE_AUTO_LIKE_READY_KEY, String(nextReadyAt));
         setLiveAutoLikeReadyAt(nextReadyAt);
         setLiveAutoCountdownNow(Date.now());
         return nextReadyAt;
@@ -1215,7 +1276,7 @@ export function SidebarApp({
 
       if (cancelled || !isLikeEnabled()) return;
       if (hasBarrageWork()) {
-        if (burstKind === "scheduled") scheduleNextRun(timings.likeBurstIdleWaitMs);
+        if (burstKind === "scheduled" || burstKind === "resume") scheduleNextRun(timings.likeBurstIdleWaitMs);
         else if (burstKind === "manual") scheduleManualLikeRetry(timings.likeBurstIdleWaitMs);
         likeBurstStartedRef.current = false;
         appendLog("warning", "自动点赞暂缓：弹幕队列正忙，稍后重试");
@@ -1223,7 +1284,7 @@ export function SidebarApp({
       }
 
       const burstUntil = burstKind === "resume" ? resumeBurstUntil : Date.now() + durationSeconds * 1000;
-      window.sessionStorage.setItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY, String(burstUntil));
+      writeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY, String(burstUntil));
       setLiveAutoLikeBurstUntil(burstUntil);
       if (burstKind === "scheduled") {
         const nextReadyAt = scheduleNextRun(timings.liveAutoLikeDelayMs);
@@ -1233,25 +1294,33 @@ export function SidebarApp({
       } else {
         appendLog("assistant", `刷新后继续自动点赞，剩余约 ${formatDuration(burstUntil - Date.now())}`);
       }
-      processingRef.current = true;
+      likePausedForBarrageRef.current = false;
       try {
         const result = await adapter.sendLike({ durationSeconds });
-        if (result.cancelled || !isLikeEnabled()) return;
+        if (result.cancelled) {
+          if (likePausedForBarrageRef.current && isLikeEnabled()) {
+            if (burstKind === "manual") scheduleManualLikeRetry(timings.likeBurstIdleWaitMs);
+            else scheduleNextRun(timings.likeBurstIdleWaitMs);
+            appendLog("assistant", "自动点赞已让出发送通道，弹幕发送后会重试");
+          }
+          return;
+        }
+        if (!isLikeEnabled()) return;
         if (result.ok) appendLog("send", `已执行 ${durationSeconds} 秒连续点赞`);
         else appendLog("error", `自动点赞失败：${result.error ?? "未知错误"}`);
       } catch (error) {
         appendLog("error", `自动点赞异常：${error instanceof Error ? error.message : "未知错误"}`);
       } finally {
-        const currentBurstUntil = Number(window.sessionStorage.getItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY) || "");
+        const currentBurstUntil = Number(readLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY) || "");
         if (!currentBurstUntil || currentBurstUntil === burstUntil || currentBurstUntil <= Date.now()) {
-          window.sessionStorage.removeItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
+          removeLiveAutoStorageItem(LIVE_AUTO_LIKE_BURST_UNTIL_KEY);
           setLiveAutoLikeBurstUntil(undefined);
         } else {
           setLiveAutoLikeBurstUntil(currentBurstUntil);
         }
         if (burstKind === "manual") setManualLikeBurstRequestId(0);
+        likePausedForBarrageRef.current = false;
         likeBurstStartedRef.current = false;
-        processingRef.current = false;
       }
     };
 
@@ -2121,7 +2190,7 @@ export function SidebarApp({
                 </label>
                 <div className="dmw-scheduled-main">
                   <strong>自动点赞</strong>
-                  <span>{likeStatusText} · 快捷键 Alt+Shift+L · 关闭不重置倒计时 · 时长 1-400 秒</span>
+                  <span>{likeStatusText} · 快捷键 {AUTO_LIKE_SHORTCUT_TEXT} · 关闭不重置倒计时 · 时长 1-400 秒</span>
                 </div>
                 <button
                   className="dmw-secondary-button dmw-countdown-reset-button"

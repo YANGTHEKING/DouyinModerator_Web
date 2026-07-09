@@ -10,7 +10,7 @@ const STORAGE_KEY = "assistantProfileV1";
 
 const timings = {
   liveMonitorIntervalMs: 20,
-  liveAutoTimedBarrageDurationMs: 200,
+  liveAutoTimedBarrageDurationMs: 45_000,
   liveAutoLikeDelayMs: 120,
   likeBurstIdleWaitMs: 10,
   likeBurstIdlePollMs: 5,
@@ -64,8 +64,10 @@ function createGiftEvent(): LiveEvent {
 
 function createMockAdapter(options?: { holdLikes?: boolean }) {
   let emitEvent: ((event: LiveEvent) => void) | undefined;
+  const actions: string[] = [];
   const sentBarrages: string[] = [];
   const likeStarts: number[] = [];
+  const likeCancels: number[] = [];
   const likeResolvers: Array<(result: PageSendResult) => void> = [];
 
   const adapter: PageAdapter = {
@@ -76,10 +78,12 @@ function createMockAdapter(options?: { holdLikes?: boolean }) {
       };
     },
     async sendBarrage(text) {
+      actions.push(`barrage:${text}`);
       sentBarrages.push(text);
       return { ok: true };
     },
     async sendLike() {
+      actions.push("like:start");
       likeStarts.push(Date.now());
       if (options?.holdLikes) {
         return new Promise<PageSendResult>((resolve) => likeResolvers.push(resolve));
@@ -87,6 +91,9 @@ function createMockAdapter(options?: { holdLikes?: boolean }) {
       return { ok: true };
     },
     async cancelLike(): Promise<PageSendResult> {
+      actions.push("like:cancel");
+      likeCancels.push(Date.now());
+      while (likeResolvers.length) likeResolvers.shift()?.({ ok: false, cancelled: true });
       return { ok: true, cancelled: true };
     },
     getTriggerSupport(): TriggerSupport {
@@ -96,8 +103,10 @@ function createMockAdapter(options?: { holdLikes?: boolean }) {
 
   return {
     adapter,
+    actions,
     sentBarrages,
     likeStarts,
+    likeCancels,
     resolveLikes(result: PageSendResult = { ok: true }) {
       while (likeResolvers.length) likeResolvers.shift()?.(result);
     },
@@ -176,9 +185,9 @@ function changeSelectValue(selector: string, value: string): void {
   });
 }
 
-function toggleLikeShortcut(): void {
+function toggleLikeShortcut(shortcut: KeyboardEventInit = { ctrlKey: true }): void {
   act(() => {
-    window.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, code: "KeyL", altKey: true, shiftKey: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, code: "KeyL", shiftKey: true, ...shortcut }));
   });
 }
 
@@ -336,6 +345,96 @@ describe("live room automation scenario", () => {
     expect(mock.sentBarrages).toContain("测试打call弹幕[打call]");
   }, 15_000);
 
+  it("prioritizes queued barrages while an auto-like burst is active", async () => {
+    const now = Date.now();
+    const profile = createRoomManagerProfile();
+    const hostedProfile: AssistantProfile = {
+      ...profile,
+      hostedModeEnabled: true,
+      timedBarragePool: {
+        ...profile.timedBarragePool,
+        enabled: true
+      },
+      scheduledActions: profile.scheduledActions.map((action) =>
+        action.kind === "like" ? { ...action, enabled: true, intervalSeconds: 1 } : action
+      ),
+      globalSendIntervalSeconds: 1
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(hostedProfile));
+    localStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
+    localStorage.setItem("dmwLiveAutoLikeReadyAt", String(now));
+    sessionStorage.setItem("dmwLiveAutoTimedBarrageHandled", "1");
+
+    const checkLiveStatus = vi.fn(async (): Promise<LiveStatusSnapshot> => ({
+      status: "live",
+      source: "dom",
+      detail: "test-live"
+    }));
+    const requestReload = vi.fn();
+    const mock = createMockAdapter({ holdLikes: true });
+
+    await mountSidebarApp({
+      adapter: mock.adapter,
+      liveStatusChecker: checkLiveStatus,
+      requestReload
+    });
+    await settle(16);
+
+    expect(mock.likeStarts).toHaveLength(1);
+    expect(Number(localStorage.getItem("dmwLiveAutoLikeBurstUntil"))).toBeGreaterThan(Date.now());
+
+    act(() => mock.emitGift());
+    await advance(700);
+
+    expect(mock.likeCancels.length).toBeGreaterThan(0);
+    expect(mock.sentBarrages.some((text) => text.includes("感谢 观众A") && text.includes("小心心"))).toBe(true);
+    expect(mock.actions.findIndex((entry) => entry === "like:cancel")).toBeLessThan(
+      mock.actions.findIndex((entry) => entry.startsWith("barrage:"))
+    );
+
+    mock.resolveLikes();
+  }, 15_000);
+
+  it("does not renew the hosted live window while live polling stays live", async () => {
+    const profile = createRoomManagerProfile();
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...profile,
+        hostedModeEnabled: true
+      } satisfies AssistantProfile)
+    );
+
+    const checkLiveStatus = vi.fn(async (): Promise<LiveStatusSnapshot> => ({
+      status: "live",
+      source: "dom",
+      detail: "test-live"
+    }));
+    const requestReload = vi.fn();
+    const mock = createMockAdapter();
+
+    await mountSidebarApp({
+      adapter: mock.adapter,
+      liveStatusChecker: checkLiveStatus,
+      requestReload
+    });
+    await settle(12);
+
+    expect(requestReload).toHaveBeenCalledTimes(1);
+    const firstExpiresAt = Number(localStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt"));
+    expect(firstExpiresAt).toBeGreaterThan(Date.now());
+
+    await advance(timings.liveMonitorIntervalMs * 3);
+
+    expect(requestReload).toHaveBeenCalledTimes(1);
+    expect(Number(localStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt"))).toBe(firstExpiresAt);
+
+    await advance(timings.liveAutoTimedBarrageDurationMs + timings.liveMonitorIntervalMs * 2);
+
+    expect(requestReload).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt")).toBeNull();
+  }, 15_000);
+
   it("resets each hosted countdown and clears all countdowns when hosted mode is turned off", async () => {
     const now = Date.now();
     const profile = createRoomManagerProfile();
@@ -351,8 +450,11 @@ describe("live room automation scenario", () => {
       } satisfies AssistantProfile)
     );
     sessionStorage.setItem("dmwLiveAutoTimedBarrageHandled", "1");
+    localStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
     sessionStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
+    localStorage.setItem("dmwLiveAutoLikeReadyAt", String(now + 5_000));
     sessionStorage.setItem("dmwLiveAutoLikeReadyAt", String(now + 5_000));
+    localStorage.setItem("dmwLiveAutoLikeBurstUntil", String(now + 3_000));
     sessionStorage.setItem("dmwLiveAutoLikeBurstUntil", String(now + 3_000));
 
     const checkLiveStatus = vi.fn(async (): Promise<LiveStatusSnapshot> => ({
@@ -378,6 +480,9 @@ describe("live room automation scenario", () => {
     await advance(100);
     clickButtonByText(/重置窗口/);
     await settle();
+    expect(Number(localStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt"))).toBe(
+      Date.now() + timings.liveAutoTimedBarrageDurationMs
+    );
     expect(Number(sessionStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt"))).toBe(
       Date.now() + timings.liveAutoTimedBarrageDurationMs
     );
@@ -385,6 +490,7 @@ describe("live room automation scenario", () => {
     await advance(100);
     clickButtonByText(/重置点赞/);
     await settle();
+    expect(Number(localStorage.getItem("dmwLiveAutoLikeReadyAt"))).toBe(Date.now() + timings.liveAutoLikeDelayMs);
     expect(Number(sessionStorage.getItem("dmwLiveAutoLikeReadyAt"))).toBe(Date.now() + timings.liveAutoLikeDelayMs);
     expect(sessionStorage.getItem("dmwLiveAutoLikeBurstUntil")).toBeNull();
 
@@ -398,6 +504,9 @@ describe("live room automation scenario", () => {
     expect(sessionStorage.getItem("dmwLiveAutoLikePending")).toBeNull();
     expect(sessionStorage.getItem("dmwLiveAutoLikeReadyAt")).toBeNull();
     expect(sessionStorage.getItem("dmwLiveAutoLikeBurstUntil")).toBeNull();
+    expect(localStorage.getItem("dmwLiveAutoTimedBarrageExpiresAt")).toBeNull();
+    expect(localStorage.getItem("dmwLiveAutoLikeReadyAt")).toBeNull();
+    expect(localStorage.getItem("dmwLiveAutoLikeBurstUntil")).toBeNull();
   }, 15_000);
 
   it("resumes an active hosted like burst after a page refresh", async () => {
@@ -416,7 +525,9 @@ describe("live room automation scenario", () => {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(hostedProfile));
     sessionStorage.setItem("dmwLiveAutoTimedBarrageHandled", "1");
+    localStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
     sessionStorage.setItem("dmwLiveAutoTimedBarrageExpiresAt", String(now + 10_000));
+    localStorage.setItem("dmwLiveAutoLikeReadyAt", String(now));
     sessionStorage.setItem("dmwLiveAutoLikeReadyAt", String(now));
 
     const checkLiveStatus = vi.fn(async (): Promise<LiveStatusSnapshot> => ({ status: "live", source: "dom", detail: "test-live" }));
